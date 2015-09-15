@@ -1,0 +1,1606 @@
+#!/bin/bash
+# -*- mode: shell-script; fill-column: 78 -*-
+# ex: filetype=sh
+#
+# DSnap v2.0.1 Local Rsync Backups With History
+# Author: Scott Shambarger <devel@shambarger.net>
+#
+# Copyright 2005-2014 Scott Shambarger.  All rights reserved.
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+# ======== SUMMARY
+#
+# DSnap is a flexible and easy to configure local file-system rsync backup
+# manager, and improves on rsync's incremental, space-efficient backups with:
+#
+#    - HISTORY       Automatically managed point-in-time snapshots.
+#    - BACKUP SETS   All backups sharing a target directory complete or
+#                      fail as a group.
+#    - LOCKING       Per-target locks permits parallel backups while
+#                      preventing conflicting ones.
+#    - EASY CONFIG   Per-source rsync filters and options.
+#    - STATE         Backup state reporting.
+#
+# In addition, DSnap includes:
+#
+#    * Full customization of configuration file locations and defaults.
+#    * Graceful error handling and easy to understand error messages.
+#    * Optional selection of target(s) for all actions.
+#    * Hooks for pre and post backup actions.
+#    * Dry-run support and debug level tracing.
+#    * Thoroughly tested code.
+#
+# Usage: DSNAP [OPTIONS] MODE [TARGET]...
+#
+# OPTIONS:
+#   -c {file} config file location (default: /etc/dsnap/config)
+#   -h        print short help, twice for detailed help
+#   -l        rsync logging to stdout (in addition to dsnap.log)
+#   -n        dry-run, no changes made (useful with -v), twice for fake access
+#   -s        sleep a short while before starting backup
+#   -v        verbose output to stdout, twice for debug logging
+#
+# MODE:
+#   list      list most recent backup for each target
+#   init      initialize new/updated backup entries, creates full backup
+#   snap      create incremental backup, run once or more daily
+#   daily | weekly | monthly | yearly
+#             manage history, run at the frequency of the mode name (eg: daily)
+#   unlock    break all target locks, useful during system boot
+#
+# TARGET:
+#   If one or more targets are supplied, only backup entries with a matching
+#   target are processed.  By default, all targets are processed.
+#:
+# ======== SIMPLE 4-STEP SETUP
+#
+# 1. Create the file /etc/dsnap/backups containing at least one line with
+#    the following (substitute {} values, directories should be full paths):
+#
+#   ; {source-dir} ; {target-dir}
+#
+# 2. "Bless" {target-dir} with a DSnap version file:
+#
+#   $ echo 2 > {target-dir}/dsnap.version
+#
+# 3. Create an initial backup:
+#
+#   $ DSNAP init
+#
+# 4. Add crontab entries to create incremental backups (see AUTOMATION below)
+#
+# However, DSnap supports a great many options (read on...).
+#
+# ======== MODES OF OPERATION
+#
+# Initial full backups are created with the special "init" mode, and is
+# required when adding/editing backup entries in the "backups" file.
+#
+# Backups are ordered by date (inter-day snap, daily, weekly etc), with
+# identical files hard linked together to save space.  DSnap should be run
+# by cron (or similar) with the following "mode" parameters:
+#
+#     snap    - run once or more a day (see MAX_PER_DAY below)
+#     daily   - run once per day, after snap
+#     weekly  - run once per week, after daily
+#     monthly - run once per month, after weekly
+#     yearly  - run once per year, after monthly
+#
+# The "snap" mode creates new incremental backups based on the full backup
+# created by "init".  All other modes just maintain the history by renaming
+# directories or removing expired backups (and are reasonably fast).
+#
+# The most recent backup time for each target can be listed with the "list"
+# mode.
+#
+# If one or more targets are included after the "mode", only backup entries
+# with matching targets are processed.  By default, all targets are processed.
+#
+# ======== BACKUP SOURCE AND TARGET CONFIGURATION
+#
+# Files:
+#     /etc/dsnap/backups
+#     /etc/dsnap/filters[-{label}]
+#
+# (see ETCDIR in CUSTOMIZATION to specify a different location)
+#
+# The "backups" file contains entries matching sources with targets.  The
+# format of the file is:
+#
+#     [ {label} ] ; {source-dir} [ ; {target-dir} [ ; {rsync-options} ] ]
+#
+# [..] indicate optional values, substitute {..} values with your own.  Values
+# are separated by semicolons, and empty lines or lines beginning with '#' are
+# ignored.
+#
+#     {source-dir} - is the source directory to backup, and is required.
+#     {label}      - is used to for filter selection and directory names for
+#                    version 2 targets. An empty {label} defaults
+#                    to {source-dir}.
+#     {target-dir} - is destination directory where all backups are stored.
+#                    An empty {target-dir} defaults to DEFAULT_TARGET_DIR.
+#     {rsync-opts} - overrides DEFAULT_RSYNC_OPTIONS
+#
+# (See CUSTOMIZATION about DEFAULT_* values).
+#
+# {source-dir} and {target-dir} should be full pathnames (starting with '/')
+# and may contain spaces, special characters, or be double quoted.  (See
+# CUSTOMIZATION about ALLOW_RELATIVE).
+#
+# Whenever adding new entries, or updating {label} or {target-dir} values, run
+# "DSNAP init {target-dir}" to create or update the target.  Without a
+# completed "reference backup," rsync will be unable to link unchanged files
+# with their existing backup copies, so "snap" fails for new/updated entries
+# until "init" is successfully run to avoid inadvertent broken hard links.
+# (See BACKUP SETS about grouping backups).
+#
+# The optional "filters" file contains rsync filters.  The file
+# "filters-{label}" is for label-specific filters.  See "man rsync"
+# (FILTER RULES section) for filter syntax.  The global or per-label file
+# is used, not both, although one may include the other.
+#
+# ======== TARGET FOLDERS
+#
+# Files/Folders:
+#     {target-dir}/dsnap.version
+#     {target-dir}/snap.1/
+#     {target-dir}/daily.1/ ...etc
+#
+# Each target must be "blessed" with the file "dsnap.version" to indicate it
+# is a valid target, or DSnap will refuse to write to it to avoid overwriting
+# random directories.  "dsnap.version" must contain the version numbers 1 or
+# 2.  The version determines the directory structure in the backup set.
+#
+# The backup history is found in folders named after their DSnap modes and
+# timestamped based on when the backup set under them completed.  The .{#}
+# suffix indicates the backup's age (.2 is older than .1, etc), eg:
+#
+#   $ ls {target-dir}
+#   dsnap.version snap.1 snap.2 daily.1 daily.2 ... weekly.1 weekly.2 ...
+#
+# ======== BACKUP SETS
+#
+# Folders:
+#     {target-dir}/snap.1/{label}/   ...or...
+#     {target-dir}/snap.1/{source-dir}/
+#
+# All entries that share a common {target-dir} (including the default) are
+# processed as a group and called a "backup set."  If a backup for any
+# entry in a set fails, the whole set fails.  Backups intended to complete
+# even when others fail should each have their own {target-dir}.
+#
+# Version 1 target sets contain the complete filesystem hierarchy mirroring
+# {source-dir}.  Version 2 sets contain a folder for each {label} containing
+# the hierarchy starting beneath {source-dir} (and can be significantly easier
+# to use).
+#
+#   $ ls {target-dir}/snap.1
+#   home-directories source-code media-archive
+#
+# Version 2 is required to use the ALLOW_RELATIVE option (see CUSTOMIZATION).
+#
+# ======== TARGET LOCKS
+#
+# Files:
+#     {target-dir}/dsnap.lock/owner
+#
+# Before new backup sets are created, or history managed, each target is
+# locked (the directory "dsnap.lock" created).  Locks are held until the
+# backup set completes, and history rotation completes (or either fails).
+# Stale locks are detected and removed by checking lock ownership
+# ("dsnap.lock/owner") or when the lock is older than the LOCK_TIMEOUT_HOURS
+# threshold (see CUSTOMIZATION).
+#
+# The special "unlock" mode attempts to break all existing locks without
+# checking if they're in use, and is intended to run at system boot (for
+# example, in rc.local).  When "unlock" is used during boot, scheduled backups
+# should be run with the "-s" (sleep) parameter to avoid a backup starting
+# before "unlock" finishes removing all the stale locks.
+#
+# ======== HOOKS
+#
+# Files:
+#     /etc/dsnap/pre-backup(*) [TARGET]...
+#     /etc/dsnap/post-backup(*) [TARGET]...
+#
+# (see HOOKDIR in CUSTOMIZATION to specify a different location)
+#
+# Hooks are useful for mount/unmount, or any other housekeeping.  The
+# "pre-backup" hook is run before backups start, the "post-backup" after they
+# complete.  If pre-backup fails, the backup will be cancelled unless
+# pre-backup exits with 24 (in which case backups continue, but DSnap exits
+# with 24 after it completes).
+#
+# Hooks receive the same TARGET parameters passed to DSnap (empty if all
+# targets are being processed).  Also, all the CUSTOMIZATION variables are in
+# the environment (see below), and the current backup mode is available in
+# $MODE.
+#
+# NOTE: No locks are held before the hooks are run, so it's possible (for
+# example) a pre-backup may be run twice before a post-backup is run if
+# backups or rotation are slow enough.  However, all post-backups are run
+# if any pre-backups are attempted.
+#
+# ======== CUSTOMIZATION
+#
+# File:
+#     /etc/dsnap/config
+#
+# Variables are assigned as '{NAME}={value}' - one per line (quotes optional)
+# (use the "-c" command-line option to specify a different location)
+#
+# Global customization and defaults overrides can made in the config file.
+# The following variables may be set:
+#
+# File location configuration:
+#
+#     DEFAULT_TARGET_DIR (default: "/opt/backup") - default target if
+#         not set in "backups"
+#
+#     ETCDIR (default: "/etc/dsnap") - Location of "backups" and "filters"
+#         (also may be set in DSnap environment)
+#
+#     HOOKDIR (default: ETCDIR) - Location of "pre-backup" and "post-backup"
+#
+#     BACKUPS (default: ETCDIR/backups) - Location of backup list
+#
+#     FILTERS (default: ETCDIR/filters) - rsync filter prefix
+#
+#     LOGFILE (default: "/var/log/dsnap/dsnap.log") - Path of rsync log,
+#         empty/unset to disable rsync logging
+#
+#     RSYNC_EXE (default: rsync in $PATH) - Full path of rsync
+#
+#     NICE_EXE (default: nice in $PATH) - Full path of nice
+#
+#     IONICE_EXE (default: ionice in $PATH) - Full path of ionice
+#
+# Feature configuration:
+#
+#     DEFAULT_RSYNC_OPTIONS (default: "-aHS") - Default rsync options
+#         (see "man rsync")
+#
+#     MAX_PER_DAY (default: 2) - Maximum number of "snap" backups to keep.
+#         (Minimum is 2 so that a full backup is available as snap.1
+#         after the "daily" mode)
+#
+#     MAX_YEARS (default: 5) Maximum number of yearly backups to keep.
+#         (Minimum is 1, or disabled by simply not running "yearly" modes)
+#
+#     ALLOW_RELATIVE (default: "no") - Set to "yes" to allow source/target
+#         directories in "backup" to be relative to the current directory
+#         when DSnap is run (ie without leading '/').  A relative
+#         {target-dir} requires "dsnap.version" 2, and an effective
+#         {label} not containing '/'
+#
+#     LOCK_TIMEOUT_HOURS (default 24) - Remove target locks even if owner
+#         appears to exist if lockfile is older than this many hours
+#         (to avoid possible stale locks).  Requires the utility "find" in
+#         the path.  Empty/unset to disable timeouts.
+#
+#     STARTUP_DELAY (default 120) - Startup delay when using "-s" (sleep) on
+#         the command line (suggested for cron entries when using "unlock"
+#         during system boot, see TARGET LOCKS)
+#
+# ======== AUTOMATION
+#
+# To automate incremental backups, add the following to your crontab (see "man
+# crontab").  DSnap does not need to be run as the root user, but it does need
+# read access too all the files it is configured to backup.  The timings below
+# assume incremental backups will complete in less than 5hrs, and removal of
+# expired backups in less than 15 mins:
+#
+#     0  */12 * * * root /usr/local/sbin/DSNAP -s snap
+#     45 5    * * * root /usr/local/sbin/DSNAP -s daily
+#     30 5    * * 0 root /usr/local/sbin/DSNAP -s weekly
+#     15 5    1 * * root /usr/local/sbin/DSNAP -s monthly
+#     0  5    1 1 * root /usr/local/sbin/DSNAP -s yearly
+#;
+# ======== SCRIPT STARTS HERE
+
+# declare these variables as numbers
+declare -i MAX_PER_DAY
+declare -i MAX_YEARS
+
+# Functions
+
+function init_defaults() {
+
+  # export config variables so pre-backup and post-backup can use them
+  set -a
+
+  # allow user environment to override ETCDIR
+  ETCDIR="${ETCDIR:-/etc/dsnap}"
+
+  # config defaults - some defaults that depend on ETCDIR are
+  # set after config is read (see read_config)
+  DEFAULT_TARGET_DIR="/opt/backup"
+  LOGFILE="/var/log/dsnap/dsnap.log"
+  ALLOW_RELATIVE="no"
+  DEFAULT_RSYNC_OPTIONS="-aHS"
+  MAX_PER_DAY=2
+  MAX_YEARS=5
+  LOCK_TIMEOUT_HOURS=24
+  STARTUP_DELAY=120
+
+  # cmdline defaults
+  CONFIG="$ETCDIR/config"
+  MODE=
+
+  DRY_RUN=
+  FAKE_DRY_RUN=
+  VERBOSE=
+  DEBUG=
+
+  # rest are private
+  set +a
+  EXIT_CODE=0
+  DELAY_ENABLED=
+  POST_HOOK_DONE=
+  HAS_BACKUPS=
+  VERBOSE_RSYNC=
+  HIDE_SKIP_ERRORS=
+  REQUESTED_TARGETS=()
+  SKIPPED_TARGETS=() # used by *_skipped_target
+  LOCKED_TARGETS=() # used by release_locked_targets and lock_target
+  PREPPED_TARGETS=() # used by prepare_target and is_prepared_target
+}
+
+function set_exit_code() {
+  # <exit-code>
+  [ ${EXIT_CODE:-0} -eq 0 ] && EXIT_CODE=$1
+  return 0
+}
+
+function err() {
+  echo 1>&2 "$*"
+  # set deferred exit code (if not already set)
+  set_exit_code 10
+  return 0
+}
+
+function usage() {
+  # <detailed=>
+  local start="Usage:" end="#:"
+  [ -n "${1:-}" ] && start="DSnap" && end="#;"
+
+  [ -n "$(command -v sed)" -a -f "$0" ] || {
+    # no sed or $0 invalid, just show basic usage
+    echo "Usage: ${0##*/} [OPTIONS] MODE [TARGET] "
+    echo "  OPTIONS: -c <file> (config), -n (dry-run), -v (verbose), -s (sleep)"
+    echo "  MODE: list | init | snap | daily | weekly | monthly | yearly | unlock"
+    echo "Read the script comments for detailed help"
+    return
+  }
+
+  # show usage or full help out of script comments
+  sed -n '/^# '$start'/,/^'$end'/ {
+     s/^# //
+     s/^# *$//
+     s/^#[:;].*$//
+     s/DSNAP/'${0##*/}'/
+     p
+  }' < "$0"
+
+  return
+}
+
+function verbose() {
+  # <msg...>
+  [ -n "$VERBOSE" ] && echo -e "$*"
+  return 0
+}
+
+function echo_words() {
+  # <words>
+  local word=
+  for word in "$@"; do
+    if [[ "$word" =~ [[:space:]]+|\"+ ]]; then
+      echo -n "'$word' "
+    else
+      echo -n "$word "
+    fi
+  done
+}
+
+function verbose_cmd() {
+  # <words...> - show each <word> double-quoted
+  [ -z "$VERBOSE" ] && return
+  [ -n "$DRY_RUN" ] && echo -n "[dry-run] " || echo -n "Running "
+  echo_words "$@"
+  echo
+}
+
+function run_fail_ok() {
+  # <cmd...>
+  verbose_cmd "$@"
+  [ -n "$DRY_RUN" ] && return
+
+  local rc=0
+  "$@" && return || rc=$?
+
+  [ -n "$VERBOSE" ] && {
+    echo_words "$@"
+    echo "failed, error code $rc"
+  }
+
+  return $rc
+}
+
+function run() {
+  # <cmd...>
+  verbose_cmd "$@"
+  [ -n "$DRY_RUN" ] && return
+
+  local rc=0
+  "$@" && return || rc=$?
+
+  # set deferred exit code (if not already set)
+  set_exit_code $rc
+
+  echo_words 1>&2 "$@"
+  echo 1>&2 "failed, error code $rc"
+
+  return $rc
+}
+
+function debug() {
+  # <msg...>
+  [ -n "$DEBUG" ] && verbose "  $*"
+  return 0
+}
+
+function exists() {
+  # <name>
+  [ -e "$1" -o -n "$FAKE_DRY_RUN" ]
+}
+
+function is_file() {
+  # <filename> <mode=read(write|dryok)>
+  local file="$1" mode="${2:-read}"
+
+  if [ "$mode" = "read" ]; then
+    [ -f "$file" -a -r "$file" ] && {
+      debug "check: read access to file '$file'" && return
+    }
+  else
+    [ -f "$file" -a -w "$file" ] && {
+      debug "check: write access to file '$file'" && return
+    }
+    [ ! -e "$file" ] && debug "check: may create file '$file'" && return
+  fi
+  [ -n "$DRY_RUN" ] && [ -n "$FAKE_DRY_RUN" -o "$mode" = "dryok" ] && {
+    [ "$mode" = "dryok" ] && mode="write"
+    debug "[dry-run] fake $mode access to file '$file'" && return
+  }
+  [ "$mode" = "dryok" ] && mode="write"
+  debug "check: no $mode access to file '$file'"
+  return 1
+}
+
+function is_dir() {
+  # <directory> [ <mode=write(read|dryok)> ]
+  local dir="$1" mode="${2:-write}"
+
+  [ -d "$dir" -a -x "$dir" -a -r "$dir" ] && {
+    [ "$mode" = "read" ] && {
+      debug "check: read access to directory '$dir'"
+      return
+    }
+    # our use of write access requires read too
+    [ -w "$dir" ] && debug "check: write access to directory '$dir'" && return
+  }
+  [ -n "$DRY_RUN" ] && [ -n "$FAKE_DRY_RUN" -o "$mode" = "dryok" ] && {
+    [ "$mode" = "dryok" ] && mode="write"
+    debug "[dry-run] fake $mode access to directory '$dir'" && return
+  }
+  [ "$mode" = "dryok" ] && mode="write"
+  debug "check: no $mode access to directory '$dir'"
+  return 1
+}
+
+function parse_cmdline() {
+  # <options...> <mode>
+
+  local optval= help=
+  while getopts "c:hlnsv" optval; do
+    case $optval in
+      c)
+        # if specific, config is required
+	CONFIG="$OPTARG"
+	debug "cmdline: setting config file '$CONFIG'"
+	if ! is_file "$CONFIG"; then
+	  err "Unable to read config file '$CONFIG'"
+	  exit 2
+	fi
+	;;
+      h)
+	[ -n "$help" ] && usage 1 && exit
+	help=1
+	;;
+      l)
+	VERBOSE_RSYNC=1
+	debug "cmdline: enabling verbose rsync"
+	;;
+      n)
+        # don't actually affect files
+	if [ -n "$DRY_RUN" ]; then
+	  FAKE_DRY_RUN=1
+	  debug "cmdline: enabling fake dry-run"
+	else
+	  DRY_RUN=1
+	  debug "cmdline: enabling dry-run"
+	fi
+	;;
+      s)
+        # sleep a short while before starting backups
+	DELAY_ENABLED=1
+	debug "cmdline: enabling startup delay"
+	;;
+      v)
+        # log to stdout
+	[ -n "$VERBOSE" ] && DEBUG=1 || VERBOSE=1
+	debug "cmdline: enabling debug output"
+	;;
+      *)
+	usage && exit 1
+	;;
+    esac
+  done
+  shift $((OPTIND-1))
+
+  [ -n "$help" ] && usage && exit
+
+  MODE="${1:-}"
+  [ -z "$MODE" ] && usage && exit 1
+  shift
+
+  debug "cmdline: dsnap mode is '$MODE'"
+
+  # check mode is valid
+  [[ "$MODE" =~ ^(list|init|snap|daily|weekly|monthly|yearly|unlock)$ ]] || {
+    [ -n "$MODE" ] && err "Invalid MODE '$MODE'"
+    usage && exit 1
+  }
+
+  for optval in "$@"; do
+    optval="${optval%/}" # remove trailing /
+    verbose "Requesting $MODE for target '$optval'"
+    REQUESTED_TARGETS+=("$optval")
+  done
+}
+
+function check_min() {
+  # <min> <var>
+  local min="$1" var="$2"
+
+  local num=${!var:-0}
+  [ $num -ge $min ] && eval $var=$num && return
+  err "Invalid config: $var=${!var:-} (minimum is $min)"
+  return 1
+}
+
+function check_globals() {
+
+  debug "checking globals"
+
+  # check that we have the basic commands we need
+  local exe=
+  for exe in touch mv rm mkdir rmdir ls; do
+    [ -z "$(command -v "$exe")" ] && {
+      err "Missing required command: $exe"
+      return 3
+    }
+  done
+
+  [ -n "${LOCK_TIMEOUT_HOURS:-}" -a -z "$(command -v find)" ] && {
+    err "WARNING: LOCK_TIMEOUT_HOURS set, but 'find' utility missing - timeout unset"
+    unset LOCK_TIMEOUT_HOURS
+  }
+
+  if ! is_file "$BACKUPS"; then
+    err "Unable to read backup list '$BACKUPS'"
+    return 3
+  fi
+
+  check_min 2 "MAX_PER_DAY" || return 3
+
+  check_min 1 "MAX_YEARS" || return 3
+
+  [[ "$MODE" =~ ^(list|init|snap|daily|weekly|monthly|yearly|unlock)$ ]] || {
+    err "Invalid MODE '$MODE' (don't set in config!)"
+    return 3
+  }
+
+  return 0
+}
+
+function parse_error() {
+  err "Parse error in '$CONFIG'"
+  exit 3
+}
+
+function read_config() {
+  if is_file "$CONFIG"; then
+    debug "\nCONFIG: sourcing config file '$CONFIG'"
+    shopt -u sourcepath
+    # check in case FAKE_DRY_RUN set
+    [ -e "$CONFIG" ] && {
+      trap parse_error EXIT
+      set -e
+      . "$CONFIG"
+      set +e
+      trap - EXIT
+    }
+  fi
+
+  # make debugging easier
+  DRY_RUN="${DRY_RUN:-}"; FAKE_DRY_RUN="${FAKE_DRY_RUN:-}"
+  VERBOSE="${VERBOSE:-}"; DEBUG="${DEBUG:-}"; MODE="${MODE:-}"
+
+  # set defaults that depend on ETCDIR, and export (allow override)
+  set -a
+  ETCDIR="${ETCDIR:-/etc/dsnap}"
+  HOOKDIR="${HOOKDIR:-$ETCDIR}"
+  BACKUPS="${BACKUPS:-$ETCDIR/backups}"
+  FILTERS="${FILTERS:-$ETCDIR/filters}"
+  set +a
+}
+
+function init_rsync() {
+
+  debug "setting up rsync executable"
+  RSYNC=()
+
+  # setup rsync execution (prepend with nice and ionice if available)
+  NICE_EXE="${NICE_EXE:-$(command -v nice)}"
+  [ -x "$NICE_EXE" ] && RSYNC+=("$NICE_EXE")
+
+  IONICE_EXE="${IONICE_EXE:-$(command -v ionice)}"
+  # Use "idle" IO scheduling class
+  [ -x "$IONICE_EXE" ] && RSYNC+=("$IONICE_EXE" -c 3)
+
+  RSYNC_EXE="${RSYNC_EXE:-$(command -v rsync)}"
+  if [ -z "$RSYNC_EXE" ]; then
+    set_exit_code 4
+    err "Unable to find rsync executable (set RSYNC_EXE in config)"
+    return 1
+  fi
+  if [ ! -x "$RSYNC_EXE" ]; then
+    set_exit_code 5
+    err "Unable to run rsync executable '$RSYNC_EXE' (override in config)"
+    return 1
+  fi
+  RSYNC+=("$RSYNC_EXE")
+}
+
+function strip() {
+  # <string> - strip leading/trailing whitespace
+  [[ "$1" =~ ^[[:space:]]*([^[:space:]]|[^[:space:]].*[^[:space:]])[[:space:]]*$ ]] && echo "${BASH_REMATCH[1]}" || return 0
+}
+
+function qstrip() {
+  # <string> - strip leading/trailing double quotes
+  [[ "$1" =~ ^\"([^\"]?.*)\"$ ]] && echo "${BASH_REMATCH[1]}" || echo "$1"
+}
+
+# uses Line
+function skip() {
+  # <msg...>
+  # show errors for backup lines (unless hidden)
+  if [ -z "${HIDE_SKIP_ERRORS:-}" -a $Line -gt 0 ]; then
+    err "WARNING: Backup line $Line: $*"
+  else
+    debug "$*"
+  fi
+  return 0
+}
+
+# uses Line
+function valid_dir() {
+  # <dir-type> <allow-relative> <dir>
+  local dir_type="$1" allow_rel="$2" dir="$3"
+
+  [ -z "$dir" ] && {
+    skip "Empty $dir_type"
+    return 1
+  }
+
+  [[ "$dir" =~ ^//*$ ]] && {
+    skip "$dir_type cannot be '/'"
+    return 1
+  }
+
+  [[ "$dir" =~ ^\.\.$|^\.\./|/\.\./|/\.\.$ ]] && {
+    skip "$dir_type cannot contain '..'"
+    return 1
+  }
+
+  [ "$allow_rel" != "yes" -a -n "${dir%%/*}" ] && {
+    skip "Invalid relative $dir_type"
+    return 1
+  }
+
+  return 0
+}
+
+function is_requested_target() {
+  # <target-dir>
+  local tar="$1" req=
+
+  debug "checking if '$tar' is a requested target"
+
+  # no requested targets means all
+  [ ${#REQUESTED_TARGETS[@]} -eq 0 ] && return
+
+  for req in "${REQUESTED_TARGETS[@]}"; do
+    [ "$tar" = "$req" ] && return
+  done
+
+  debug "  it's not a requested target, skipping"
+
+  return 1
+}
+
+function is_skipped_target() {
+  # <target-dir>
+  local tar="$1" skip=
+
+  debug "checking if '$tar' is a skipped target"
+
+  [ ${#SKIPPED_TARGETS[@]} -gt 0 ] && for skip in "${SKIPPED_TARGETS[@]}"; do
+    [ "$tar" = "$skip" ] && debug "  it's a skipped target" && return
+  done
+
+  return 1
+}
+
+function add_skipped_target() {
+  # <target-dir>
+  local tar="$1"
+
+  verbose "Adding target '$tar' to skipped targets"
+  SKIPPED_TARGETS+=("$tar")
+}
+
+# sets Vers
+function get_target_version() {
+  # <target-dir>
+  local version="$1/dsnap.version"
+
+  debug "checking version of '$1'"
+
+  # check Target as a "blessed" directory
+  is_file "$version" || {
+    skip "'$version' missing"
+    return 1
+  }
+
+  if [ -n "$FAKE_DRY_RUN" ] && [ ! -f "$version" -o ! -r "$version" ]; then
+    Vers=2
+    debug "[dry-run] fake target version $Vers"
+  else
+    read -n 10 Vers < "$version" || {
+      skip "Unable to read '$version'"
+      return 1
+    }
+    debug "target is version $Vers"
+  fi
+
+  [ "$Vers" != "1" -a "$Vers" != "2" ] && {
+    skip "'$version' is '$Vers'; only 1 and 2 are supported"
+    return 1
+  }
+
+  # valid version
+  return 0
+}
+
+# uses Line Label Source Target
+function verify_backup_entry() {
+
+  # Target looks legit, any errors now add Target to skipped targets
+  is_dir "$Target" || {
+    skip "Unable to write to target '$Target'"
+    return 1
+  }
+
+  get_target_version "$Target" || return 1
+
+  valid_dir "source directory" "${ALLOW_RELATIVE:-no}" "$Source" || return 1
+
+  valid_dir "label" "yes" "$Label" || return 1
+
+  if [ -n "${Target%%/*}" ]; then
+
+    # if Target is relative, rsync expects a relative link-dest too (so the
+    # Label cannot contain '/', or the relative link-dest would be broken)
+    if [ $Vers -eq 1 ]; then
+      skip "Relative targets require version 2 targets (and labels)"
+      return 1
+    fi
+
+    if [ -z "${Label##*/*}" ]; then
+      skip "Relative targets cannot have labels containing '/'"
+      return 1
+    fi
+  fi
+
+  # verify source dir
+  is_dir "$Source" "read" || {
+    skip "Unable to access source directory '$Source'"
+    return 1
+  }
+
+  return 0
+}
+
+# uses Line, sets Label Source Target Opts Vers
+function get_backup_entry() {
+  # <type(valid|all)> <[label];source-dir;[target-dir;[opts]]>
+  local type="$1" entry="$2"
+
+  # init return values
+  Label=; Source=; Target=; Opts=; Vers=
+
+  # empty entry?
+  [ -z "$entry" ] && return 1
+
+  debug "parsing backup line $Line: '$entry'"
+
+  local IFS=";" item= i=0 names=("Label" "Source" "Target" "Opts")
+  for item in $entry; do
+    item=$(strip "$item")
+    item=$(qstrip "$item")
+    eval ${names[$i]}=\'$item\'
+    [ ${names[$((i++))]} = "Opts" ] && break
+  done
+
+  # set defaults
+  [ -z "$Label" ] && Label="$Source"
+  [ -z "$Target" ] && Target="${DEFAULT_TARGET_DIR:-}"
+  [ -z "$Opts" ] && Opts="${DEFAULT_RSYNC_OPTIONS:--aHS}"
+
+  debug "parsed backup specs:\n    Label='$Label'\n    Source='$Source'\n    Target='$Target'\n    Opts='$Opts'"
+
+  # remove trailing /
+  Label="${Label%/}"; Source="${Source%/}"; Target="${Target%/}"
+
+  valid_dir "target directory" "${ALLOW_RELATIVE:-no}" "$Target" || return 1
+
+  is_requested_target "$Target" || return 1
+
+  is_skipped_target "$Target" && {
+    skip "Target '$Target' in skipped targets"
+    return 1
+  }
+
+  [ "$type" = "all" ] || verify_backup_entry || {
+    add_skipped_target "$Target"
+    return 1
+  }
+
+  return 0
+}
+
+function read_backups() {
+
+  debug "\nBACKUPS: reading backups file '$BACKUPS'"
+
+  # read $BACKUPS file into array $BACKUP_ENTRIES
+  BACKUP_ENTRIES=()
+
+  local entry=
+  while read entry || [ -n "$entry" ]; do
+    entry=$(strip "$entry")
+    [[ "$entry" =~ ^#.* ]] && entry=
+    [ -n "$entry" ] && HAS_BACKUPS=1
+    BACKUP_ENTRIES+=("$entry")
+  done < "$BACKUPS"
+
+  [ ${#BACKUP_ENTRIES[@]} -gt 0 ]
+}
+
+function run_hooks() {
+  # <okrc> <script-name>
+  local okrc="$1" src="$HOOKDIR/$2"
+
+  debug "\nHOOK: hook for '$src'"
+
+  local file= rc=
+  for file in "${src}"*; do
+
+    ! is_file "$file" && continue
+    
+    if [ ! -x "$file" ]; then
+      rc=1
+      err "'$file' cannot be executed"
+    else
+      rc=0
+      if [ ${#REQUESTED_TARGETS[@]} -gt 0 ]; then
+	run "$file" "${REQUESTED_TARGETS[@]}" || rc=$?
+      else
+	run "$file" || rc=$?
+      fi
+    fi
+
+    # $okrc of 0 means ignore rc
+    [ $rc -eq 0 -o $okrc -eq 0 ] && continue
+
+    # set exit code
+    set_exit_code $rc
+
+    # anything besides $okrc should fail
+    [ $rc -ne $okrc ] && err "Cancelling backup" && return 1
+
+  done
+
+  return 0
+}
+
+# succeeds if lock valid, sets Pid if available
+function get_lock_pid() {
+  # <lock-dir>
+  local lock="$1" owner="$1/owner"
+  Pid=
+
+  [ -n "$DRY_RUN" ] && Pid=$$ && return
+
+  # if no owner-file, no owner (but if owner exists, we can't read it)
+  is_file "$owner" || { [ -f "$owner" ]; return; }
+
+  # read Pid from owner (if possible)
+  read -n 10 Pid < "$owner" || Pid=0
+
+  # if our lock, it's valid
+  [ "$Pid" = $$ ] && return
+
+  # Ensure Pid is a number
+  Pid=$(printf 2>/dev/null '%d' "$Pid") || Pid=0
+
+  # check if ps exists and supports -p
+  if [ $Pid -gt 0 -a -n "$(command -v ps)" ] && ps >/dev/null 2>&1 -p $$; then
+
+    # check if stale
+    ps >/dev/null 2>&1 -p "$Pid" || {
+
+      # report as dead
+      Pid="$Pid (dead)"
+
+      verbose "No process owns lock '$lock', removing it"
+      run rm -f "$owner" && return 1
+
+      # treat lock as valid since we can't break it
+      err "WARNING: Unable to break stale lock '$lock'"
+      return 0
+    }
+  fi
+
+  # check for timeout
+  [ -n "${LOCK_TIMEOUT_HOURS:-}" ] && {
+
+    debug "checking if lock '$lock' has expired"
+
+    local expired=$(find 2>/dev/null "$owner" -mtime "+${LOCK_TIMEOUT_HOURS}h")
+
+    [ -n "$expired" ] && {
+
+      verbose "Lock '$lock' older than $LOCK_TIMEOUT_HOURS hours, removing it"
+      run rm -f "$owner" && return 1
+
+      # treat lock as valid since we can't break it
+      err "WARNING: Unable to break expired lock '$lock'"
+    }
+  }
+
+  # lock valid, not ours
+  return 0
+}
+
+function set_lock_owner() {
+  # <lock-dir>
+  local owner="$1/owner"
+
+  # lock acquired, save owner and return
+  [ -n "$DRY_RUN" ] || echo $$ > "$owner" && return
+
+  debug "failed to create file '$owner'"
+
+  return 1
+}
+
+function release_locked_targets() {
+
+  debug "\nRELEASE: releasing locked targets"
+
+  local Target= lock= Pid=
+  [ ${#LOCKED_TARGETS[@]} -gt 0 ] && for Target in "${LOCKED_TARGETS[@]}"; do
+
+    lock="$Target/dsnap.lock"
+
+    # if lock not valid, skip
+    get_lock_pid "$lock" || continue
+
+    # if lock not ours, skip
+    [ "$Pid" = $$ ] || continue
+
+    # remove lock dir
+    run rm -rf "$lock" || err "WARNING: Unable to remove lock for target '$Target'"
+  done
+
+  # clear list
+  LOCKED_TARGETS=()
+
+  # remove trap
+  trap - EXIT
+
+  return 0
+}
+
+# sets AllTargets
+function get_all_targets() {
+  # <type>
+  local type="$1"
+
+  local Line=0 Label= Source= Target= Opts= Vers= # used by get_backup_entry
+  local dup= entry= targets=()
+  for entry in "${BACKUP_ENTRIES[@]}"; do
+
+    ((++Line))
+    get_backup_entry $type "$entry" || continue
+
+    targets+=("$Target")
+  done
+
+  AllTargets=()
+  [ ${#targets[@]} -gt 0 ] && for Target in "${targets[@]}"; do
+
+    is_skipped_target "$Target" && continue
+
+    # see if already in list
+    [ ${#AllTargets[@]} -gt 0 ] && for dup in "${AllTargets[@]}"; do
+      [ "$Target" = "$dup" ] && continue 2
+    done
+
+    debug "adding '$Target' to AllTargets list"
+    AllTargets+=("$Target")
+  done
+
+  return 0
+}
+
+function mode_unlock() {
+
+  debug "\nUNLOCK: unlocking targets"
+
+  local AllTargets=()
+  get_all_targets "valid"
+
+  local Target=
+  [ ${#AllTargets[@]} -gt 0 ] && for Target in "${AllTargets[@]}"; do
+
+    debug "unlocking target '$Target'"
+
+    exists "$Target/dsnap.lock" || continue
+
+    verbose "Removing '$Target/dsnap.lock'"
+
+    # remove lock dir
+    run rm -rf "$Target/dsnap.lock" || err "WARNING: Unable to remove lock for target '$Target'"
+  done
+
+  return 0
+}
+
+function mode_list() {
+
+  debug "\nLIST: listing targets"
+
+  local AllTargets=()
+  get_all_targets "all"
+
+  local Target= words=() Vers= tag= Line=0
+  [ ${#AllTargets[@]} -gt 0 ] && for Target in "${AllTargets[@]}"; do
+
+    debug "listing target '$Target'"
+
+    if [ ! -d "$Target" ]; then
+      tag="  (no-access)   "
+    elif ! get_target_version "$Target"; then
+      tag="  (bad-version) "
+    else
+      [ -d "$Target/snap.1" ] && words=($(ls 2>/dev/null -ld "$Target/snap.1")) || words=()
+      if [ ${#words[@]} -lt 9 ]; then
+	tag="  (none)        "
+      else
+	tag=$(printf "[ %3.3s %2.2s %5.5s ]" "${words[5]}" "${words[6]}" "${words[7]}")
+      fi
+    fi
+    echo "$tag $Target"
+
+  done
+
+  return 0
+}
+
+function cleanup() {
+
+  # remove all target locks (if any)
+  release_locked_targets
+
+  [ -z "${POST_HOOK_DONE:-}" ] && {
+    run_hooks 0 "post-backup"
+    POST_HOOK_DONE=1
+  }
+}
+
+function trap_exit() {
+  trap - EXIT
+  err "Unexpected exit, cleaning up locks"
+  cleanup
+  exit $EXIT_CODE
+}
+
+function lock_target() {
+  # <target-dir>
+  local tar="$1" lock="$1/dsnap.lock" locked=
+
+  debug "checking if target '$tar' already locked"
+
+  # if already locked, just return (skipped targets don't call lock)
+  [ ${#LOCKED_TARGETS[@]} -gt 0 ] && for locked in "${LOCKED_TARGETS[@]}"; do
+    [ "$tar" = "$locked" ] && {
+      debug "target '$tar' already locked"
+      return
+    }
+  done
+
+  # add trap to cleanup on unexpected exit
+  trap trap_exit EXIT
+
+  debug "attempting to lock target '$tar'"
+
+  local retry= Pid=
+  while ! run_fail_ok mkdir 2>/dev/null "$lock"; do
+
+    # check existence
+    [ -d "$lock" ] || {
+      set_exit_code 1
+      err "WARNING: Unable to create lock for target '$tar'"
+      return 1
+    }
+
+    # check if lock valid
+    get_lock_pid "$lock" || [ -n "$retry" ] && {
+
+      # lock owned or we lost the race on retry
+      if [ -n "$Pid" ]; then
+	err "WARNING: Target '$tar' locked by process $Pid"
+      else
+	err "WARNING: Target '$tar' locked by another process"
+      fi
+
+      return 1
+    }
+
+    run rmdir "$lock" || {
+      err "WARNING: Unable to remove stale lock '$lock'"
+      return 1
+    }
+
+    verbose "Removed stale lock '$lock'"
+
+    retry=1
+  done
+
+  # add to locked list (even if we don't own it yet, unlock will check)
+  # if we fail to get lock, target get's added to skipped targets...
+  LOCKED_TARGETS+=("$tar")
+
+  # lock acquired, set ownership (or fail)
+  set_lock_owner "$lock" && {
+    debug "successfully locked target '$tar'"
+    return
+  }
+
+  # failed to set owner, fail
+  err "Failed to lock target '$tar'"
+
+  return 1
+}
+
+function mode_rotate() {
+
+  # init becomes snap once complete
+  [ "$MODE" = "init" ] && MODE="snap"
+
+  debug "\nROTATE: performing '$MODE' rotation"
+
+  local AllTargets=()
+  get_all_targets "valid"
+
+  # these variables need to be named after $MODE values
+  local snap="$MAX_PER_DAY" daily=7 weekly=4 monthly=12 yearly="$MAX_YEARS"
+  # mappings from mode to previous mode
+  local bsnap= bdaily=snap bweekly=daily bmonthly=weekly byearly=monthly
+
+  local bmode= num= dnum= src_backup= new_backup= old_backup= Target=
+  [ ${#AllTargets[@]} -gt 0 ] && for Target in "${AllTargets[@]}"; do
+
+    debug "rotating target '$Target'"
+
+    num=${!MODE}
+    if [ -z "$num" ]; then
+      set_exit_code 7
+      err "FATAL: '$MODE' has no rotation limits (check mode_rotate function)"
+      break
+    fi
+
+    # get previous mode
+    bmode=b$MODE
+    bmode=${!bmode} # maps daily->snap etc
+
+    new_backup="$Target/$MODE.0"
+
+    # lock new target or skip
+    lock_target "$Target" || continue
+
+    if [ -z "$bmode" ]; then
+
+      debug "setting date on '$new_backup'"
+
+      is_dir "$new_backup" "dryok" || {
+	verbose "No new backup to rotate in: '$new_backup'"
+	continue
+      }
+
+      run touch "$new_backup" || {
+	err "WARNING: Unable to set timestamp on '$new_backup'"
+	err "Skipping '$MODE' rotation for target '$Target'"
+	continue
+      }
+
+    elif ! exists "$new_backup"; then
+
+      # max to keep from previous mode
+      dnum=${!bmode}
+
+      # move latest from previous mode ($bmode.$dnum) to this mode ($MODE.0)
+      src_backup="$Target/$bmode.$dnum"
+
+      is_dir "$src_backup" || {
+	verbose "No new backup to rotate in: '$src_backup'"
+	continue
+      }
+
+      debug "moving oldest backup '$src_backup' to '$new_backup'"
+
+      run mv -f "$src_backup" "$new_backup" || {
+	err "WARNING: Unable to move '$bmode.$dnum' to '$MODE.0' for target '$Target'"
+	err "Skipping '$MODE' rotation for target '$Target'"
+	continue
+      }
+
+    elif ! is_dir "$new_backup"; then
+      verbose "New backup not valid '$new_backup'"
+      continue
+    fi
+
+    # if we have more of this mode than we want, remove the oldest
+    debug "have $MODE.0, try to remove expired backups"
+    old_backup="$Target/$MODE.$num"
+
+    if exists "$old_backup"; then
+
+      debug "remove oldest backup '$old_backup'"
+
+      run rm 2>/dev/null -rf "$old_backup" || {
+	err "WARNING: Unable to remove expired backup '$old_backup'"
+	err "Skipping '$MODE' rotation for target '$Target'"
+	continue
+      }
+    fi
+
+    # now move 4->5 3->4... etc
+    debug "rotating '$MODE' folders"
+
+    while [ $num -gt 0 ]; do
+
+      dnum=$((num--))
+
+      # loose test on rotation... might be a placeholder
+      exists "$Target/$MODE.$num" || continue
+
+      run mv -f "$Target/$MODE.$num" "$Target/$MODE.$dnum" || {
+	err "WARNING: Unable to finish rotating '$MODE' for target '$Target'"
+	break
+      }
+    done
+
+  done
+
+  return 0
+}
+
+function is_prepared_target() {
+  # <target-dir>
+  local tar="$1" prep=
+
+  debug "checking if '$tar' in prepped targets"
+
+  [ ${#PREPPED_TARGETS[@]} -gt 0 ] && for prep in "${PREPPED_TARGETS[@]}"; do
+    [ "$tar" = "$prep" ] && return
+  done
+
+  return 1
+}
+
+function prepare_target() {
+  # <target-dir>
+  local tar="$1"
+
+  is_prepared_target "$tar" && return
+
+  debug "\nPREPARE: preparing '$tar'"
+
+  # ok, ready to modify target, lock it
+  lock_target "$tar" || return 1
+
+  local new_backup="$tar/snap.0"
+  if exists "$new_backup"; then
+
+    verbose "Removing partial backup '$new_backup'"
+
+    run rm 2>/dev/null -rf "$new_backup" || {
+      err "WARNING: Unable to remove partial backup '$new_backup'"
+      return 1
+    }
+  fi
+
+  debug "prep successful, adding target '$tar' to prepped targets"
+
+  PREPPED_TARGETS+=("$tar")
+}
+
+function mode_snap() {
+
+  debug "\nSNAP: performing '$MODE' backup"
+
+  # check rsync can be found
+  init_rsync || return 0
+
+  if [ -n "${LOGFILE:-}" ]; then
+
+    # create log dir if missing
+    debug "logging enabled to '$LOGFILE'"
+
+    local logdir="${LOGFILE%/*}"
+    if [ "$logdir" != "$LOGFILE" ]; then
+
+      is_dir "$logdir" || {
+	run mkdir -p "$logdir" && is_dir "$logdir" "dryok" || {
+	  err "Unable to create '$logdir' for rsync logging"
+	  return
+	}
+      }
+    fi
+
+    is_file "$LOGFILE" "write" || {
+      err "Unable to write to '$LOGFILE' for rsync logging"
+      return
+    }
+  fi
+
+  local Line=0 Label= Source= Target= Opts= Vers= # used by get_backup_entry
+  local dest_dir= prev_backup= link_dest= opt= options=()
+
+  local entry=
+  for entry in "${BACKUP_ENTRIES[@]}"; do
+
+    ((++Line))
+    get_backup_entry "valid" "$entry" || continue
+
+    # build options for this backup entry
+    options=()
+
+    # add filter if available
+    if [ -n "${Label##*/*}" ] && is_file "$FILTERS-$Label"; then
+      debug "rsync filter is '$FILTERS-$Label'"
+      options+=("--filter=merge $FILTERS-$Label")
+    elif is_file "$FILTERS"; then
+      debug "rsync filter is '$FILTERS'"
+      options+=("--filter=merge $FILTERS")
+    fi
+
+    # verbose or quiet
+    if [ -n "${VERBOSE_RSYNC:-}" ]; then
+      options+=("-v" "--out-format=%i %n%L")
+    else
+      options+=("-q")
+    fi
+
+    # version 1 uses Source for Label in dest_dir
+    [ $Vers -eq 1 ] && Label="$Source"
+
+    dest_dir="$Target/snap.0/${Label#/}"
+    debug "rsync destination is '$dest_dir'"
+
+    prev_backup="$Target/snap.1/${Label#/}"
+    if is_dir "$prev_backup"; then
+
+      # previous backup, convert init to snap
+      if [ "$MODE" = "init" ]; then
+	verbose "Backup exists for label '$Label' - performing snap"
+      fi
+
+      # set link-dest based on whether target is relative or absolute
+      if [ -n "${Target%%/*}" ]; then
+	link_dest="../../snap.1/${Label#/}"
+      else
+	link_dest="$prev_backup"
+      fi
+      debug "rsync link-dest is '$link_dest'"
+
+      options+=("--link-dest=$link_dest/")
+
+    elif [ "$MODE" = "snap" ]; then
+
+      err "WARNING: Previous backup '$prev_backup' missing"
+      err "  (NOTE: Run '${0##*/} init' after adding/editing backup entries)"
+      add_skipped_target "$Target"
+      continue
+    else
+      link_dest=
+    fi
+
+    # user or default options
+    for opt in $Opts; do options+=("$opt"); done
+
+    # only add file logging if not dry-run (or rsync will still write logs)
+    if [ -n "$DRY_RUN" ]; then
+      options+=("--dry-run")
+    else
+      options+=("--log-file=$LOGFILE")
+    fi
+
+    # we're ready to prep this target
+    prepare_target "$Target" || {
+      add_skipped_target "$Target"
+      continue
+    }
+
+    # create dest_dir
+    is_dir "$dest_dir" || {
+      run mkdir -p "$dest_dir" && is_dir "$dest_dir" "dryok" || {
+	err "WARNING: Unable to create new destination directory '$dest_dir'"
+	add_skipped_target "$Target"
+	continue
+      }
+    }
+
+    if [ -n "$link_dest" ]; then
+      verbose "Backing up '$Source' to '$dest_dir'"
+    else
+      verbose "Creating initial backup of '$Source' to '$dest_dir'"
+    fi
+
+    verbose_cmd "${RSYNC[@]}" "${options[@]}" "$Source/" "$dest_dir/"
+    local rc=0
+    if [ -z "$FAKE_DRY_RUN" ]; then
+      "${RSYNC[@]}" "${options[@]}" "$Source/" "$dest_dir/" || rc=$?
+    fi
+
+    # allow rsync error 24 (files vanished) as source may be in use
+    if [ $rc -ne 0 -a $rc -ne 24 ]; then
+
+      verbose "rsync failed with error $rc"
+      err "WARNING: Backup to destination '$dest_dir' failed"
+      add_skipped_target "$Target"
+      continue
+    fi
+
+    debug "rsync for destination '$dest_dir' completed"
+  done
+
+  debug "\nCLEANUP: checking all prepared targets for failures"
+
+  local new_backup=
+  [ ${#PREPPED_TARGETS[@]} -gt 0 ] && for Target in "${PREPPED_TARGETS[@]}"; do
+
+    is_skipped_target "$Target" || continue
+
+    debug "cleanup failed target '$Target'"
+
+    new_backup="$Target/snap.0"
+
+    # anything to cleanup?
+    exists "$new_backup" || continue
+
+    err "Removing partial '$new_backup' to avoid incomplete references"
+
+    run rm 2>/dev/null -rf "$new_backup" || {
+      # appears the target has gone read-only...
+      err "WARNING: Unable to remove partial '$new_backup'"
+    }
+  done
+
+  # can rotate now, all failed backups will be skipped
+  HIDE_SKIP_ERRORS=1
+  mode_rotate
+}
+
+function trap_signal() {
+  trap - INT TERM
+  set_exit_code 8
+  err "Backup cancelled by signal"
+  exit $EXIT_CODE
+}
+
+function handle_mode() {
+
+  # fail with any error-code except 24
+  run_hooks 24 "pre-backup" || return 0
+
+  # read backups
+  read_backups || return 0
+
+  # any non-empty entries?
+  [ -n "$HAS_BACKUPS" ] || { debug "No backups to process" && return 0; }
+
+  if [ "$MODE" != "unlock" -a "$MODE" != "list" ]; then
+    [ -n "${DELAY_ENABLED:-}" -a -n "${STARTUP_DELAY:-}" ] && {
+      verbose "Delaying for '$STARTUP_DELAY' seconds before starting"
+      sleep "$STARTUP_DELAY"
+    }
+  fi
+
+  case "$MODE" in
+    unlock)
+      mode_unlock
+      ;;
+    list)
+      mode_list
+      ;;
+    init|snap)
+      mode_snap
+      ;;
+    *)
+      mode_rotate
+      ;;
+  esac
+
+  return 0
+}
+
+# trap INT or TERM, so EXIT is triggered (and locks cleanup)
+trap trap_signal INT TERM
+
+# Now let's get started...
+init_defaults
+
+parse_cmdline "$@"
+
+read_config
+
+# sanity check values
+check_globals || exit
+
+handle_mode
+
+cleanup
+
+debug "$MODE complete, exit ${EXIT_CODE:-0}"
+
+exit ${EXIT_CODE:-0}

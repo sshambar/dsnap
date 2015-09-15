@@ -1,0 +1,284 @@
+#!/bin/bash
+# -*- mode: shell-script; fill-column: 78 -*-
+# ex: filetype=sh
+#
+# Mount Hook v1.0 for DSnap 
+# Author: Scott Shambarger <devel@shambarger.net>
+#
+# Copyright 2005-2014 Scott Shambarger.  All rights reserved.
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+# ======== SUMMARY
+#
+# This program will manage mounts from the config file "mount_config"
+# and will deal with multiple processes using the mounts together.
+#
+# DSnap calls the programs "pre-backup(*)" before backups start, and
+# "post-backup(*)" after backups end.  This program is designed to be linked
+# (and run) using those prefixes.
+#
+# Usage: pre-backup-mount [TARGET]...
+# Usage: post-backup-mount [TARGET]...
+#
+# TARGET:
+#   If one or more targets are supplied, only mounts matching or parents of
+#   those targets are processed.  By default, all mounts are processed.
+#
+# ======== CONFIGURATION
+#
+# Environment:
+#     HOOKDIR (default: "/etc/dsnap") - Alternate location of "mount_config"
+#
+# File:
+#     /etc/dsnap/mount_config
+#
+# Variables are assigned as '{NAME}={value}' - one per line (quotes optional)
+#
+# Configuration:
+#
+#     VOLUMES (default: empty) - array of mount points to process
+#         eg. VOLUMES=("/mnt/home-backups" "/mnt/media-backups")
+#
+#     LOCK_UMASK (default: "022") - umask for lock directory/files
+#
+#     FAILURE_CODE (default: 1) - return code if none of the mounts
+#         succeed.
+#
+# ======== MOUNT SETUP
+#
+# Directories:
+#     {mount}/dsnap.volume
+#     {mount}/dsnap.volume/holds
+# Files:
+#     {mount}/dsnap.volume/holds/dsnap-{pid}
+# 
+# Substitute {..} with each array element configured in VOLUMES above.
+#
+# Create the directory "{mount}/dsnap.volume" with write access to all users
+# who may need to use the mount.
+#
+# When a process wants to claim mounts, this program should be called as
+# "pre-backup."  For each matching entry in VOLUMES (restricted by TARGET(s)
+# if suppied), the program checks if the directory "{mount}/dsnap.volume"
+# exists, and if not, attempts to mount the volume "{mount}.  On finding
+# "dsnap.volume," the "holds" directory is created under it and the file
+# "dsnap-{pid}" created based on the parent process ID.  pre-backup returns 0
+# if successful, 24 if at least one dsnap-{pid} file was created, or
+# 1 otherwise.
+#
+# If "pre-backup" is called with the environment variable "MODE=unlock" then
+# then any existing directory "dsnap.volume/holds" is removed before the
+# dsnap-{pid} file is created.
+#
+# When a process wishes to release mounts, this program should be called as
+# "post-backup."  It will attempt to remove any "dsnap-{pid}" files, and then
+# if (and only if) the "holds" directory is empty, unmount the volume "{mount}"
+#
+
+RC=0
+TAGGED=
+PROG="${0##*/}"
+
+HOOKDIR="${HOOKDIR:-/etc/dsnap}"
+CONFIG="$HOOKDIR/mount_config"
+
+ETCDIR="${ETCDIR:-/etc/dsnap}"
+LOCK_UMASK="022"
+declare -i FAILURE_CODE=1
+
+[ -f "$CONFIG" -a -r "$CONFIG" ] || exit 0
+shopt -u sourcepath
+. "$CONFIG"
+
+[ ${#VOLUMES[@]} -gt 0 ] || exit 0
+
+function err() {
+  echo 1>&2 "$*"
+  [ $RC -eq 0 ] && RC=${FAILURE_CODE:-1}
+  return 0
+}
+
+function verbose() {
+  [ -n "$VERBOSE" ] && echo "$*"
+  return 0
+}
+
+function check_utils() {
+
+  # check that we have the basic commands we need
+  local exe=
+  for exe in touch rm mkdir rmdir mount umount; do
+    [ -z "$(command -v $exe)" ] && {
+      err "Missing required command: $exe"
+      return 1
+    }
+  done
+
+  return 0
+}
+
+function is_valid() {
+  # <dir>
+  [ -d "$1" -a -x "$1" -a -w "$1" ]
+}
+
+function unmount_vol() {
+  # <volume>
+  local vol="$1"
+  verbose "Unmounting '$vol'"
+  umount "$vol" || err "Failed to unmount '$vol'"
+}
+
+function handle_pre() {
+  # <volume>
+  local vol="$1" mounted=
+  local backup="$vol/dsnap.volume"
+  local holds="$backup/holds"
+  local tag="$holds/dsnap-$PPID"
+
+  is_valid "$backup" || {
+
+    verbose "Mounting '$vol'"
+
+    mount "$vol" || {
+      err "Unable to mount '$vol'"
+      return
+    }
+
+    mounted=1
+
+    is_valid "$backup" || {
+      err "Mount not a backup volume, cannot write to '$backup'"
+      unmount_vol "$vol"
+      return
+    }
+  }
+
+  # if unlock, remove prior to add_hold
+  [ "${MODE:-}" = "unlock" -a -e "$holds" ] && rm 2>/dev/null -rf "$holds" || :
+
+  # set umask in case we have multiple users writing to $holds
+  umask "${LOCK_UMASK:-022}" || :
+
+  # mkdir if $holds missing (ignore mkdir race)
+  is_valid "$holds" || mkdir 2>/dev/null "$holds" || :
+
+  if is_valid "$holds"; then
+
+    verbose "Claiming mount '$vol'"
+
+    # $holds may be removed before we tag it
+    touch "$tag" && TAGGED=24 && return
+
+    err "Unable to create '$tag'"
+
+    # if rmdir succeeds, no tags so unmount
+    mounted=
+    rmdir 2>/dev/null "$holds" && mounted=1
+    # NOTE: face race, $holds may be created again...
+
+  elif [ -d "$holds" ]; then
+    err "Unable to write to '$holds'"
+  else
+    err "Unable to create '$holds'"
+  fi
+
+  # failed
+  [ -n "$mounted" ] && unmount_vol "$vol"
+
+  return 0
+}
+
+function handle_post() {
+  # <volume>
+  local vol="$1"
+  local backup="$vol/dsnap.volume"
+  local holds="$backup/holds"
+  local tag="$holds/dsnap-$PPID"
+
+  # valid backup?
+  is_valid "$backup" || return 0
+
+  # check if we have a claim to release
+  if is_valid "$holds" && [ -e "$tag" ]; then
+
+    verbose "Releasing mount '$vol'"
+
+    rm -f "$tag" || {
+      err "Unable to remove '$tag'"
+      return 0
+    }
+  fi
+
+  # if rmdir fails, other holds in place
+  rmdir 2>/dev/null "$holds" || return 0
+  # NOTE: fast race, $holds may be created again...
+
+  unmount_vol "$vol"
+}
+
+function handle_volume() {
+  # <volume>
+
+  case "$PROG" in
+    pre-backup*)
+      handle_pre "$1"
+      ;;
+    post-backup*)
+      handle_post "$1"
+      ;;
+  esac
+}
+
+function handle_requests() {
+
+  local target= vol= handled=()
+  for target in "$@"; do
+
+    [ ${#handled[@]} -gt 0 ] && for vol in "${handled[@]}"; do
+      [ "${target#$vol}" = "$target" ] || continue 2
+    done
+
+    for vol in "${VOLUMES[@]}"; do
+      [ "${target#$vol}" = "$target" ] && continue
+      handle_volume "$vol"
+      handled+=("$vol")
+    done
+  done
+
+  return 0
+}
+
+function handle_all() {
+
+  local vol=
+  for vol in "${VOLUMES[@]}"; do handle_volume "$vol"; done
+
+  return 0
+}
+
+check_utils || exit $RC
+
+if [ "$#" -gt 0 ]; then
+  handle_requests "$@"
+else
+  handle_all
+fi
+
+# if errors, return 24 if any tagged, else RC
+[ $RC -ne 0 ] && exit ${TAGGED:-$RC}
+
+exit 0
+

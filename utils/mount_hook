@@ -2,10 +2,10 @@
 # -*- mode: shell-script; fill-column: 78 -*-
 # ex: filetype=sh
 #
-# Mount Hook v1.0 for DSnap 
+# Mount Hook v1.1 for DSnap
 # Author: Scott Shambarger <devel@shambarger.net>
 #
-# Copyright 2005-2014 Scott Shambarger.  All rights reserved.
+# Copyright 2005-2014,2019 Scott Shambarger.  All rights reserved.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -56,6 +56,9 @@
 #     FAILURE_CODE (default: 1) - return code if none of the mounts
 #         succeed.
 #
+#     MIN_SPACE (default: 0) - fail if free-space (in 1k blocks) < value
+#         (can have K/M/G/T suffix)
+#
 # ======== MOUNT SETUP
 #
 # Directories:
@@ -63,7 +66,7 @@
 #     {mount}/dsnap.volume/holds
 # Files:
 #     {mount}/dsnap.volume/holds/dsnap-{pid}
-# 
+#
 # Substitute {..} with each array element configured in VOLUMES above.
 #
 # Create the directory "{mount}/dsnap.volume" with write access to all users
@@ -76,7 +79,7 @@
 # "dsnap.volume," the "holds" directory is created under it and the file
 # "dsnap-{pid}" created based on the parent process ID.  pre-backup returns 0
 # if successful, 24 if at least one dsnap-{pid} file was created, or
-# 1 otherwise.
+# $FAILURE_CODE otherwise.
 #
 # If "pre-backup" is called with the environment variable "MODE=unlock" then
 # then any existing directory "dsnap.volume/holds" is removed before the
@@ -97,6 +100,7 @@ CONFIG="$HOOKDIR/mount_config"
 ETCDIR="${ETCDIR:-/etc/dsnap}"
 LOCK_UMASK="022"
 declare -i FAILURE_CODE=1
+declare MIN_SPACE=
 
 [ -f "$CONFIG" -a -r "$CONFIG" ] || exit 0
 shopt -u sourcepath
@@ -115,6 +119,24 @@ function verbose() {
   return 0
 }
 
+# convert <num> to kilobytes
+function to_k() {
+  # <num> - in #, #K, #M, #TB etc format (K by default, -1 on error)
+  [ -z "$1" ] && echo 0 && return
+  local -i mult=1 num=$(echo "$1" | tr -C -d 0-9)
+  local -l scale=$(echo "$1" | tr -d 0-9bB)
+  [ $num -lt 0 ] && echo -1 && return
+  [ -z "$scale" ] && echo $num && return
+  case "$scale" in
+    k) mult=1;;
+    m) mult=1024;;
+    g) mult=1048576;;
+    t) mult=1073741824;;
+    *) echo -1 && return;;
+  esac
+  echo $(($num * $mult))
+}
+
 function check_utils() {
 
   # check that we have the basic commands we need
@@ -127,6 +149,18 @@ function check_utils() {
   done
 
   return 0
+}
+
+# prints the mount target of <dir>, empty if not a valid mount point
+function mount_point() {
+  # <dir>
+  df 2>/dev/null -P "$1" | tail -1 | tr -s ' ' | cut -s -d ' ' -f 6- -
+}
+
+# prints freespace in 1k blocks
+function mount_freespace() {
+  # <vol>
+  df 2>/dev/null -k -P "$1" | tail -1 | tr -s ' ' | cut -s -d ' ' -f 4 -
 }
 
 function is_valid() {
@@ -143,12 +177,19 @@ function unmount_vol() {
 
 function handle_pre() {
   # <volume>
-  local vol="$1" mounted=
+  local vol="$1" mounted= mnt=
   local backup="$vol/dsnap.volume"
   local holds="$backup/holds"
   local tag="$holds/dsnap-$PPID"
 
-  is_valid "$backup" || {
+  mnt=$(mount_point "$vol")
+  [ -z "$mnt" ] && err "'$1' is not a valid mountpoint" && return
+
+  local -i min_space=$(to_k "$MIN_SPACE")
+  [ $min_space -lt 0 ] && err "Invalid MIN_SPACE value '$MIN_SPACE'" && return
+
+  # check if <vol> already mounted
+  [ "$mnt" = "$vol" ] || {
 
     verbose "Mounting '$vol'"
 
@@ -158,12 +199,24 @@ function handle_pre() {
     }
 
     mounted=1
+  }
 
-    is_valid "$backup" || {
-      err "Mount not a backup volume, cannot write to '$backup'"
-      unmount_vol "$vol"
+  [ $min_space -gt 0 ] && {
+
+    verbose "Checking freespace on '$vol'"
+
+    local -i fs=$(mount_freespace "$vol")
+    [ $min_space -gt $fs ] && {
+      err "Mount '$vol' has less than ${min_space}k free (${fs}k)"
+      [ -n "$mounted" ] && unmount_vol "$vol"
       return
     }
+  }
+
+  is_valid "$backup" || {
+    err "Mount not a backup volume, cannot write to '$backup'"
+    [ -n "$mounted" ] && unmount_vol "$vol"
+    return
   }
 
   # if unlock, remove prior to add_hold
@@ -203,10 +256,14 @@ function handle_pre() {
 
 function handle_post() {
   # <volume>
-  local vol="$1"
+  local vol="$1" mnt=
   local backup="$vol/dsnap.volume"
   local holds="$backup/holds"
   local tag="$holds/dsnap-$PPID"
+
+  # valid mountpoint?
+  mnt=$(mount_point "$vol")
+  [ -n "$mnt" -a "$mnt" = "$vol" ] || return 0
 
   # valid backup?
   is_valid "$backup" || return 0
@@ -247,11 +304,15 @@ function handle_requests() {
   local target= vol= handled=()
   for target in "$@"; do
 
+    target=${target%/}
+    [ -n "$target" ] || continue
+
     [ ${#handled[@]} -gt 0 ] && for vol in "${handled[@]}"; do
       [ "${target#$vol}" = "$target" ] || continue 2
     done
 
     for vol in "${VOLUMES[@]}"; do
+      vol=${vol%/}
       [ "${target#$vol}" = "$target" ] && continue
       handle_volume "$vol"
       handled+=("$vol")
@@ -264,7 +325,7 @@ function handle_requests() {
 function handle_all() {
 
   local vol=
-  for vol in "${VOLUMES[@]}"; do handle_volume "$vol"; done
+  for vol in "${VOLUMES[@]}"; do handle_volume "${vol%/}"; done
 
   return 0
 }

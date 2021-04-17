@@ -3,3 +3,9 @@ dsnap-2.0.1
 
 - first public version
 
+dsnap-2.1.1
+===========
+
+- added remote mirror support
+- support Ctrl-C (or kill) to cancel running backup
+

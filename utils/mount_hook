@@ -2,7 +2,7 @@
 # -*- mode: shell-script; fill-column: 78 -*-
 # ex: filetype=sh
 #
-# Mount Hook v1.1 for DSnap
+# Mount Hook v1.2 for DSnap
 # Author: Scott Shambarger <devel@shambarger.net>
 #
 # Copyright 2005-2014,2019 Scott Shambarger.  All rights reserved.
@@ -172,7 +172,13 @@ function unmount_vol() {
   # <volume>
   local vol="$1"
   verbose "Unmounting '$vol'"
-  umount "$vol" || err "Failed to unmount '$vol'"
+  if command >/dev/null -v systemctl; then
+    systemctl stop "$(systemd-escape -p --suffix=mount "$vol")" || {
+      err "Failed to unmount '$vol'"
+    }
+  else
+    umount "$vol" || err "Failed to unmount '$vol'"
+  fi
 }
 
 function handle_pre() {
@@ -193,10 +199,17 @@ function handle_pre() {
 
     verbose "Mounting '$vol'"
 
-    mount "$vol" || {
-      err "Unable to mount '$vol'"
-      return
-    }
+    if command >/dev/null -v systemctl; then
+      systemctl start "$(systemd-escape -p --suffix=mount "$vol")" || {
+        err "Unable to mount '$vol'"
+        return
+      }
+    else
+      mount "$vol" || {
+        err "Unable to mount '$vol'"
+        return
+      }
+    fi
 
     mounted=1
   }

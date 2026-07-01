@@ -1,11 +1,11 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # -*- mode: shell-script; fill-column: 78 -*-
 # ex: filetype=sh
 #
-# DSnap v2.1.1 Local Rsync Backups With History
+# DSnap v2.2.0 Local Rsync Backups With History
 # Author: Scott Shambarger <devel@shambarger.net>
 #
-# Copyright 2005-2014,2021 Scott Shambarger.  All rights reserved.
+# Copyright Scott Shambarger.  All rights reserved.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -356,10 +356,12 @@
 #     0  5    1 1 * root /usr/local/sbin/DSNAP -s yearly
 #;
 # ======== SCRIPT STARTS HERE
+# shellcheck disable=SC1090
 
 # declare these variables as numbers
 declare -i MAX_PER_DAY
 declare -i MAX_YEARS
+declare -i EXIT_CODE
 
 # Functions
 
@@ -394,7 +396,6 @@ function init_defaults() {
 
   # rest are private
   set +a
-  EXIT_CODE=0
   DELAY_ENABLED=
   REMOTE_ENABLED=
   POST_HOOK_DONE=
@@ -411,7 +412,7 @@ function init_defaults() {
 
 function set_exit_code() {
   # <exit-code>
-  [ ${EXIT_CODE:-0} -eq 0 ] && EXIT_CODE=$1
+  (( EXIT_CODE == 0 )) && EXIT_CODE=$1
   return 0
 }
 
@@ -444,9 +445,9 @@ function warn() {
 function usage() {
   # <detailed=>
   local start="Usage:" end="#:"
-  [ -n "${1:-}" ] && start="DSnap" && end="#;"
+  [[ $1 ]] && start="DSnap" && end="#;"
 
-  [ -n "$(command -v sed)" -a -f "$0" ] || {
+  [[ $(command -v sed) && -f $0 ]] || {
     # no sed or $0 invalid, just show basic usage
     log "Usage: ${0##*/} [OPTIONS] MODE [TARGET] "
     log "  OPTIONS: -c <file> (config), -n (dry-run), -v (verbose), -s (sleep)"
@@ -457,11 +458,11 @@ function usage() {
   }
 
   # show usage or full help out of script comments
-  sed -n '/^# '$start'/,/^'$end'/ {
+  sed -n '/^# '"$start"'/,/^'"$end"'/ {
      s/^# //
      s/^# *$//
      s/^#[:;].*$//
-     s/DSNAP/'${0##*/}'/
+     s/DSNAP/'"${0##*/}"'/
      p
   }' < "$0"
 
@@ -471,19 +472,19 @@ function usage() {
 function verbose() {
   # <msg...>
   debuglog "$*"
-  [ -n "$VERBOSE" ] && echo -e "${LOG_PRE}${*//\\n/\\n${LOG_PRE}}"
+  [[ $VERBOSE ]] && echo -e "${LOG_PRE}${*//\\n/\\n${LOG_PRE}}"
   return 0
 }
 
 function debug() {
   # <msg...>
-  [ -n "$DEBUG" ] && verbose "  $*" || debuglog "  $*"
+  { [[ $DEBUG ]] && verbose "  $*"; } || debuglog "  $*"
   return 0
 }
 
 function echo_words() {
   # <words>
-  local word=
+  local word
   for word in "$@"; do
     if [[ "$word" =~ [[:space:]]+|\"+ ]]; then
       echo -n "'$word' "
@@ -496,8 +497,8 @@ function echo_words() {
 function verbose_cmd() {
   # <words...> - show each <word> double-quoted
   debuglog "Running $*"
-  [ -z "$VERBOSE" ] && return 0
-  [ -n "$DRY_RUN" ] && echo -n "${LOG_PRE}[dry-run] " ||
+  [[ $VERBOSE ]] || return 0
+  [[ $DRY_RUN ]] && echo -n "${LOG_PRE}[dry-run] " ||
       echo -n "${LOG_PRE}Running "
   echo_words "$@"
   echo
@@ -506,12 +507,12 @@ function verbose_cmd() {
 function run_fail_ok() {
   # <cmd...>
   verbose_cmd "$@"
-  [ -n "$DRY_RUN" ] && return 0
+  [[ $DRY_RUN ]] && return
 
-  local rc=0
-  "$@" && return 0 || rc=$?
+  "$@" && return
+  local rc=$?
 
-  [ -n "$VERBOSE" ] && {
+  [[ $VERBOSE ]] && {
     echo_words "$@"
     log "Command failed, error code $rc"
   }
@@ -522,10 +523,10 @@ function run_fail_ok() {
 function run() {
   # <cmd...>
   verbose_cmd "$@"
-  [ -n "$DRY_RUN" ] && return 0
+  [[ $DRY_RUN ]] && return
 
-  local rc=0
-  "$@" && return 0 || rc=$?
+  "$@" && return
+  local rc=$?
 
   # set deferred exit code (if not already set)
   set_exit_code $rc
@@ -538,59 +539,59 @@ function run() {
 
 function exists() {
   # <name>
-  [ -e "$1" -o -n "$FAKE_DRY_RUN" ]
+  [[ -e $1 || $FAKE_DRY_RUN ]]
 }
 
 function is_file() {
   # <filename> <mode=read(write|dryok)>
-  local file="$1" mode="${2:-read}"
+  local file=$1 mode=${2:-read}
 
-  if [ "$mode" = "read" ]; then
-    [ -f "$file" -a -r "$file" ] && {
+  if [[ $mode == read ]]; then
+    [[ -f $file && -r $file ]] && {
       debug "read access available to file '$file'"
       return 0
     }
   else
-    [ -f "$file" -a -w "$file" ] && {
+    [[ -f $file && -w $file ]] && {
       debug "write access available to file '$file'"
       return 0
     }
-    [ ! -e "$file" ] && {
+    [[ -e $file ]] || {
       debug "may create file '$file'"
       return 0
     }
   fi
-  [ -n "$DRY_RUN" ] && [ -n "$FAKE_DRY_RUN" -o "$mode" = "dryok" ] && {
-    [ "$mode" = "dryok" ] && mode="write"
+  [[ $DRY_RUN ]] && [[ $FAKE_DRY_RUN || $mode == dryok ]] && {
+    [[ $mode == dryok ]] && mode="write"
     debug "[dry-run] fake $mode access to file '$file'"
     return 0
   }
-  [ "$mode" = "dryok" ] && mode="write"
+  [[ $mode == dryok ]] && mode="write"
   debug "no $mode access to file '$file'"
   return 1
 }
 
 function is_dir() {
   # <directory> [ <mode=write(read|dryok)> ]
-  local dir="$1" mode="${2:-write}"
+  local dir=$1 mode=${2:-write}
 
-  [ -d "$dir" -a -x "$dir" -a -r "$dir" ] && {
-    [ "$mode" = "read" ] && {
+  [[ -d $dir && -x $dir && -r $dir ]] && {
+    [[ $mode == read ]] && {
       debug "read access available to directory '$dir'"
       return 0
     }
     # our use of write access requires read too
-    [ -w "$dir" ] && {
+    [[ -w $dir ]] && {
       debug "write access available to directory '$dir'"
       return 0
     }
   }
-  [ -n "$DRY_RUN" ] && [ -n "$FAKE_DRY_RUN" -o "$mode" = "dryok" ] && {
-    [ "$mode" = "dryok" ] && mode="write"
+  [[ $DRY_RUN ]] && [[ $FAKE_DRY_RUN || $mode == dryok ]] && {
+    [[ $mode == dryok ]] && mode="write"
     debug "[dry-run] fake $mode access to directory '$dir'"
     return 0
   }
-  [ "$mode" = "dryok" ] && mode="write"
+  [[ $mode == dryok ]] && mode="write"
   debug "no $mode access to directory '$dir'"
   return 1
 }
@@ -598,18 +599,18 @@ function is_dir() {
 function parse_cmdline() {
   # <options...> <mode>
 
-  local optval= help=
+  local optval help
 
   # check if we're a remote dsnap
   for optval in "$@"; do
-    [ "$optval" = ":remote" ] && { LOG_PRE="log:"; ERR_PRE="error:"; }
+    [[ $optval == :remote ]] && { LOG_PRE="log:"; ERR_PRE="error:"; }
   done
 
   while getopts "c:hlnrsv" optval; do
     case $optval in
       c)
         # if specific, config is required
-	CONFIG="$OPTARG"
+	CONFIG=$OPTARG
 	debug "cmdline: setting config file '$CONFIG'"
 	if ! is_file "$CONFIG"; then
 	  err "Unable to read config file '$CONFIG'"
@@ -617,7 +618,7 @@ function parse_cmdline() {
 	fi
 	;;
       h)
-	[ -n "$help" ] && usage 1 && exit
+	[[ $help ]] && usage 1 && exit
 	help=1
 	;;
       l)
@@ -626,7 +627,7 @@ function parse_cmdline() {
 	;;
       n)
         # don't actually affect files
-	if [ -n "$DRY_RUN" ]; then
+	if [[ $DRY_RUN ]]; then
 	  FAKE_DRY_RUN=1
 	  debug "cmdline: enabling fake dry-run"
 	else
@@ -645,7 +646,7 @@ function parse_cmdline() {
 	;;
       v)
         # log to stdout
-	[ -n "$VERBOSE" ] && DEBUG=1 || VERBOSE=1
+	[[ $VERBOSE ]] && DEBUG=1 || VERBOSE=1
 	debug "cmdline: enabling debug output"
 	;;
       *)
@@ -655,17 +656,17 @@ function parse_cmdline() {
   done
   shift $((OPTIND-1))
 
-  [ -n "$help" ] && usage && exit
+  [[ $help ]] && usage && exit
 
-  MODE="${1:-}"
-  [ -z "$MODE" ] && usage && exit 1
+  MODE=$1
+  [[ $MODE ]] || { usage && exit 1; }
   shift
 
   debug "cmdline: dsnap mode is '$MODE'"
 
   # check mode is valid (:remote used internally)
-  [[ "$MODE" =~ ^(list|init|snap|daily|weekly|monthly|yearly|unlock|:remote)$ ]] || {
-    [ -n "$MODE" ] && err "Invalid MODE '$MODE'"
+  [[ $MODE =~ ^(list|init|snap|daily|weekly|monthly|yearly|unlock|:remote)$ ]] || {
+    [[ $MODE ]] && err "Invalid MODE '$MODE'"
     usage && exit 1
   }
 
@@ -678,11 +679,11 @@ function parse_cmdline() {
 
 function check_min() {
   # <min> <var>
-  local min="$1" var="$2"
+  local min=$1 var=$2
 
-  local num=${!var:-0}
-  [ $num -ge $min ] && eval $var=$num && return 0
-  err "Invalid config: $var=${!var:-} (minimum is $min)"
+  local -i num=${!var:-0}
+  (( num >= min )) && eval "$var=$num" && return
+  err "Invalid config: $var=${!var} (minimum is $min)"
   return 1
 }
 
@@ -690,20 +691,20 @@ function check_globals() {
 
   debug "checking globals"
 
-  [ -n "$DEBUGFILE" ] && {
+  [[ $DEBUGFILE ]] && {
     is_file "$DEBUGFILE" "write" || log "debugfile '$DEBUGFILE' not writable"
   }
 
   # check that we have the basic commands we need
-  local exe=
+  local exe
   for exe in touch mv rm mkdir rmdir ls; do
-    [ -z "$(command -v "$exe")" ] && {
+    command >/dev/null -v "$exe" || {
       err "Missing required command: $exe"
       return 3
     }
   done
 
-  [ -n "${LOCK_TIMEOUT_HOURS:-}" -a -z "$(command -v find)" ] && {
+  [[ $LOCK_TIMEOUT_HOURS && -z $(command -v find) ]] && {
     warn "LOCK_TIMEOUT_HOURS set, but 'find' utility missing - timeout unset"
     unset LOCK_TIMEOUT_HOURS
   }
@@ -717,7 +718,7 @@ function check_globals() {
 
   check_min 1 "MAX_YEARS" || return 3
 
-  [[ "$MODE" =~ ^(list|init|snap|daily|weekly|monthly|yearly|unlock|:remote)$ ]] || {
+  [[ $MODE =~ ^(list|init|snap|daily|weekly|monthly|yearly|unlock|:remote)$ ]] || {
     err "Invalid MODE '$MODE' (don't set in config!)"
     return 3
   }
@@ -725,6 +726,7 @@ function check_globals() {
   return 0
 }
 
+# shellcheck disable=SC2329
 function parse_error() {
   err "Parse error in '$CONFIG'"
   exit 3
@@ -735,7 +737,7 @@ function read_config() {
     debug "\nCONFIG: sourcing config file '$CONFIG'"
     shopt -u sourcepath
     # check in case FAKE_DRY_RUN set
-    [ -e "$CONFIG" ] && {
+    [[ -e $CONFIG ]] && {
       trap parse_error EXIT
       set -e
       . "$CONFIG"
@@ -744,22 +746,18 @@ function read_config() {
     }
   fi
 
-  # make debugging easier
-  DRY_RUN="${DRY_RUN:-}"; FAKE_DRY_RUN="${FAKE_DRY_RUN:-}"
-  VERBOSE="${VERBOSE:-}"; DEBUG="${DEBUG:-}"; MODE="${MODE:-}"
-
   # set defaults that depend on ETCDIR, and export (allow override)
   set -a
-  ETCDIR="${ETCDIR:-/etc/dsnap}"
-  HOOKDIR="${HOOKDIR:-$ETCDIR}"
-  BACKUPS="${BACKUPS:-$ETCDIR/backups}"
-  FILTERS="${FILTERS:-$ETCDIR/filters}"
+  ETCDIR=${ETCDIR:-/etc/dsnap}
+  HOOKDIR=${HOOKDIR:-$ETCDIR}
+  BACKUPS=${BACKUPS:-$ETCDIR/backups}
+  FILTERS=${FILTERS:-$ETCDIR/filters}
   set +a
 
   # these require values if needed
-  REMOTE_LOCK_HOST="${REMOTE_LOCK_HOST:-dsnap-remote}"
-  REMOTE_HOST="${REMOTE_HOST:-dsnap-remote}"
-  REMOTE_SNAP_EXE="${REMOTE_SNAP_EXE:-dsnap}"
+  REMOTE_LOCK_HOST=${REMOTE_LOCK_HOST:-dsnap-remote}
+  REMOTE_HOST=${REMOTE_HOST:-dsnap-remote}
+  REMOTE_SNAP_EXE=${REMOTE_SNAP_EXE:-dsnap}
 }
 
 function init_rsync() {
@@ -768,52 +766,53 @@ function init_rsync() {
   RSYNC=()
 
   # setup rsync execution (prepend with nice and ionice if available)
-  NICE_EXE="${NICE_EXE:-$(command -v nice)}"
-  [ -x "$NICE_EXE" ] && RSYNC+=("$NICE_EXE")
+  NICE_EXE=${NICE_EXE:-$(command -v nice)}
+  [[ -x $NICE_EXE ]] && RSYNC=("$NICE_EXE")
 
-  IONICE_EXE="${IONICE_EXE:-$(command -v ionice)}"
+  IONICE_EXE=${IONICE_EXE:-$(command -v ionice)}
   # Use "idle" IO scheduling class
-  [ -x "$IONICE_EXE" ] && RSYNC+=("$IONICE_EXE" -c 3)
+  [[ -x $IONICE_EXE ]] && RSYNC+=("$IONICE_EXE" -c 3)
 
-  RSYNC_EXE="${RSYNC_EXE:-$(command -v rsync)}"
-  if [ -z "$RSYNC_EXE" ]; then
+  RSYNC_EXE=${RSYNC_EXE:-$(command -v rsync)}
+  [[ $RSYNC_EXE ]] || {
     set_exit_code 4
     err "Unable to find rsync executable (set RSYNC_EXE in config)"
     return 1
-  fi
-  if [ ! -x "$RSYNC_EXE" ]; then
+  }
+  [[ -x $RSYNC_EXE ]] || {
     set_exit_code 5
     err "Unable to run rsync executable '$RSYNC_EXE' (override in config)"
     return 1
-  fi
+  }
   RSYNC+=("$RSYNC_EXE")
 
-  if [ -n "$REMOTE_ENABLED" ]; then
+  [[ $REMOTE_ENABLED ]] && {
     debug "setting up ssh executable"
     SSH_EXE="${SSH_EXE:-$(command -v ssh)}"
-    if [ ! -x "$SSH_EXE" ]; then
+    [[ -x $SSH_EXE ]] || {
       set_exit_code 6
       err "Unable to run ssh executable '$SSH_EXE' (override in config)"
       return 1
-    fi
-  fi
+    }
+  }
 }
 
 function strip() {
   # <string> - strip leading/trailing whitespace
-  [[ "$1" =~ ^[[:space:]]*([^[:space:]]|[^[:space:]].*[^[:space:]])[[:space:]]*$ ]] && echo "${BASH_REMATCH[1]}" || return 0
+  [[ $1 =~ ^[[:space:]]*([^[:space:]]|[^[:space:]].*[^[:space:]])[[:space:]]*$ ]] &&
+    echo "${BASH_REMATCH[1]}" || return 0
 }
 
 function qstrip() {
   # <string> - strip leading/trailing double quotes
-  [[ "$1" =~ ^\"([^\"]?.*)\"$ ]] && echo "${BASH_REMATCH[1]}" || echo "$1"
+  [[ $1 =~ ^\"([^\"]?.*)\"$ ]] && echo "${BASH_REMATCH[1]}" || echo "$1"
 }
 
 # uses Line
 function skip() {
   # <msg...>
   # show errors for backup lines (unless hidden)
-  if [ -z "${HIDE_SKIP_ERRORS:-}" -a $Line -gt 0 ]; then
+  if [[ -z $HIDE_SKIP_ERRORS && $Line -gt 0 ]]; then
     warn "Backup line $Line: $*"
   else
     debug "$*"
@@ -824,24 +823,24 @@ function skip() {
 # uses Line
 function valid_dir() {
   # <dir-type> <allow-relative> <dir>
-  local dir_type="$1" allow_rel="$2" dir="$3"
+  local dir_type=$1 allow_rel=$2 dir=$3
 
-  [ -z "$dir" ] && {
+  [[ $dir ]] || {
     skip "Empty $dir_type"
     return 1
   }
 
-  [[ "$dir" =~ ^//*$ ]] && {
+  [[ $dir =~ ^//*$ ]] && {
     skip "$dir_type cannot be '/'"
     return 1
   }
 
-  [[ "$dir" =~ ^\.\.$|^\.\./|/\.\./|/\.\.$ ]] && {
+  [[ $dir =~ ^\.\.$|^\.\./|/\.\./|/\.\.$ ]] && {
     skip "$dir_type cannot contain '..'"
     return 1
   }
 
-  [ "$allow_rel" != "yes" -a -n "${dir%%/*}" ] && {
+  [[ $allow_rel != yes && ${dir%%/*} ]] && {
     skip "Invalid relative $dir_type"
     return 1
   }
@@ -851,15 +850,15 @@ function valid_dir() {
 
 function is_requested_target() {
   # <target-dir>
-  local tar="$1" req=
+  local tar=$1 req
 
   debug "checking if '$tar' is a requested target"
 
   # no requested targets means all
-  [ ${#REQUESTED_TARGETS[@]} -eq 0 ] && return 0
+  (( ${#REQUESTED_TARGETS[@]} == 0 )) && return
 
   for req in "${REQUESTED_TARGETS[@]}"; do
-    [ "$tar" = "$req" ] && return 0
+    [[ $tar == "$req" ]] && return
   done
 
   debug "  it's not a requested target, skipping"
@@ -869,12 +868,12 @@ function is_requested_target() {
 
 function is_skipped_target() {
   # <target-dir>
-  local tar="$1" skip=
+  local tar=$1 skip
 
   debug "checking if '$tar' is a skipped target"
 
   for skip in "${SKIPPED_TARGETS[@]}"; do
-    [ "$tar" = "$skip" ] && {
+    [[ $tar == "$skip" ]] && {
       debug "  it's a skipped target"
       return 0
     }
@@ -885,7 +884,7 @@ function is_skipped_target() {
 
 function add_skipped_target() {
   # <target-dir>
-  local tar="$1"
+  local tar=$1
 
   verbose "Adding target '$tar' to skipped targets"
   SKIPPED_TARGETS+=("$tar")
@@ -904,23 +903,23 @@ function get_target_version() {
     return 1
   }
 
-  if [ -n "$FAKE_DRY_RUN" ] && [ ! -f "$version" -o ! -r "$version" ]; then
+  if [[ $FAKE_DRY_RUN ]] && [[ ! -f $version || ! -r $version ]]; then
     Vers=2
     debug "[dry-run] fake target version $Vers"
   else
-    read -n 10 Vers < "$version" || {
+    read -rn 10 Vers < "$version" || {
       skip "Unable to read '$version'"
       return 1
     }
     debug "target is version $Vers"
   fi
 
-  [ "$Vers" != "1" -a "$Vers" != "2" ] && {
+  (( Vers != 1 && Vers != 2 )) && {
     skip "'$version' is '$Vers'; only 1 and 2 are supported"
     return 1
   }
 
-  [ -n "$REMOTE_ENABLED" -a "$Vers" == 1 ] && {
+  [[ $REMOTE_ENABLED ]] && (( Vers == 1 )) && {
     skip "'$version' is '$Vers'; remote requires version 2"
     return 1
   }
@@ -944,22 +943,22 @@ function verify_backup_entry() {
 
   valid_dir "label" "yes" "$Label" || return 1
 
-  if [ -n "${Target%%/*}" ]; then
+  [[ ${Target%%/*} ]] && {
 
     # if Target is relative, rsync expects a relative link-dest too (so the
     # Label cannot contain '/', or the relative link-dest would be broken)
-    if [ $Vers -eq 1 ]; then
+    (( Vers == 1 )) && {
       skip "Relative targets require version 2 targets (and labels)"
       return 1
-    fi
+    }
 
-    if [ -z "${Label##*/*}" ]; then
+    [[ ${Label##*/*} ]] || {
       skip "Relative targets cannot have labels containing '/'"
       return 1
-    fi
-  fi
+    }
+  }
 
-  [ -n "$REMOTE_ENABLED" ] || {
+  [[ $REMOTE_ENABLED ]] || {
     # verify source dir
     is_dir "$Source" "read" || {
       skip "Unable to access source directory '$Source'"
@@ -973,30 +972,30 @@ function verify_backup_entry() {
 # uses Line, sets Label Source Target Opts Vers
 function get_backup_entry() {
   # <type(valid|all)> <[label];source-dir;[target-dir;[opts]]>
-  local type="$1" entry="$2"
+  local type=$1 entry=$2
 
   # init return values
-  Label=; Source=; Target=; Opts=; Vers=
+  Label='' Source='' Target='' Opts='' Vers=''
 
   # empty entry?
-  [ -z "$entry" ] && return 1
+  [[ $entry ]] || return 1
 
   debug "parsing backup line $Line: '$entry'"
 
-  local IFS=";" item= i=0 src= names=("Label" "src" "Target" "Opts")
+  local IFS=";" item i=0 src names=(Label src Target Opts)
   for item in $entry; do
     item=$(strip "$item")
     item=$(qstrip "$item")
-    eval ${names[$i]}=\'$item\'
-    [ ${names[$((i++))]} = "Opts" ] && break
+    eval "${names[$i]}='${item//\'/}'"
+    [[ ${names[$((i++))]} == Opts ]] && break
   done
 
   Source=${src#remote:}
 
   # set defaults
-  [ -z "$Label" ] && Label="$Source"
-  [ -z "$Target" ] && Target="${DEFAULT_TARGET_DIR:-}"
-  [ -z "$Opts" ] && Opts="${DEFAULT_RSYNC_OPTIONS:--aHS}"
+  Label=${Label:-$Source}
+  Target=${Target:-$DEFAULT_TARGET_DIR}
+  Opts=${Opts:-${DEFAULT_RSYNC_OPTIONS:--aHS}}
 
   debug "parsed backup specs:\n    Label='$Label'\n    Source='$src'\n    Target='$Target'\n    Opts='$Opts'"
 
@@ -1037,11 +1036,11 @@ function read_backups() {
   # read $BACKUPS file into array $BACKUP_ENTRIES
   BACKUP_ENTRIES=()
 
-  local entry=
-  while read entry || [ -n "$entry" ]; do
+  local entry
+  while read -r entry || [[ $entry ]]; do
     entry=$(strip "$entry")
-    [[ "$entry" =~ ^#.* ]] && entry=
-    [ -n "$entry" ] && HAS_BACKUPS=1
+    [[ $entry =~ ^#.* ]] && entry=''
+    [[ $entry ]] && HAS_BACKUPS=1
     BACKUP_ENTRIES+=("$entry")
   done < "$BACKUPS"
 
@@ -1050,35 +1049,35 @@ function read_backups() {
 
 function run_hooks() {
   # <okrc> <script-name>
-  local okrc="$1" src="$HOOKDIR/$2"
+  local okrc=$1 src="$HOOKDIR/$2"
 
   debug "\nHOOK: hook for '$src'"
 
-  local file= rc=
-  for file in "${src}"*; do
+  local file rc
+  for file in "$src"*; do
 
     ! is_file "$file" && continue
 
-    if [ ! -x "$file" ]; then
-      rc=1
-      err "'$file' cannot be executed"
-    else
+    if [[ -x $file ]]; then
       rc=0
       if [ ${#REQUESTED_TARGETS[@]} -gt 0 ]; then
 	run "$file" "${REQUESTED_TARGETS[@]}" || rc=$?
       else
 	run "$file" || rc=$?
       fi
+    else
+      rc=1
+      err "'$file' cannot be executed"
     fi
 
     # $okrc of 0 means ignore rc
-    [ $rc -eq 0 -o $okrc -eq 0 ] && continue
+    (( rc == 0 || okrc == 0 )) && continue
 
     # set exit code
     set_exit_code $rc
 
     # anything besides $okrc should fail
-    [ $rc -ne $okrc ] && err "Cancelling backup" && return 1
+    (( rc != okrc )) && err "Cancelling backup" && return 1
 
   done
 
@@ -1088,25 +1087,25 @@ function run_hooks() {
 # succeeds if lock valid, sets Pid if available
 function get_lock_pid() {
   # <lock-dir>
-  local lock="$1" owner="$1/owner"
-  Pid=
+  local lock=$1 owner="$1/owner"
+  Pid=''
 
-  [ -n "$DRY_RUN" ] && Pid=$$ && return 0
+  [[ $DRY_RUN ]] && Pid=$$ && return
 
   # if no owner-file, no owner (but if owner exists, we can't read it)
-  is_file "$owner" || { [ -f "$owner" ]; return $?; }
+  is_file "$owner" || { [[ -f $owner ]]; return; }
 
   # read Pid from owner (if possible)
-  read -n 10 Pid < "$owner" || Pid=0
+  read -rn 10 Pid < "$owner" || Pid=0
 
   # if our lock, it's valid
-  [ "$Pid" = $$ ] && return 0
+  [[ $Pid == "$$" ]] && return
 
   # Ensure Pid is a number
   Pid=$(printf 2>/dev/null '%d' "$Pid") || Pid=0
 
-  # check if ps exists and supports -p
-  if [ $Pid -gt 0 -a -n "$(command -v ps)" ] && ps >/dev/null 2>&1 -p $$; then
+  # check if ps supports -p
+  { (( Pid > 0 )) && ps &>/dev/null -p "$$"; } && {
 
     # check if stale
     ps >/dev/null 2>&1 -p "$Pid" || {
@@ -1121,16 +1120,14 @@ function get_lock_pid() {
       warn "Unable to break stale lock '$lock'"
       return 0
     }
-  fi
+  }
 
   # check for timeout
-  [ -n "${LOCK_TIMEOUT_HOURS:-}" ] && {
+  [[ $LOCK_TIMEOUT_HOURS ]] && {
 
     debug "checking if lock '$lock' has expired"
 
-    local expired=$(find 2>/dev/null "$owner" -mtime "+${LOCK_TIMEOUT_HOURS}h")
-
-    [ -n "$expired" ] && {
+    [[ $(find "$owner" -mtime "+${LOCK_TIMEOUT_HOURS}h" 2>/dev/null) ]] && {
 
       verbose "Lock '$lock' older than $LOCK_TIMEOUT_HOURS hours, removing it"
       run rm -f "$owner" && return 1
@@ -1149,7 +1146,7 @@ function set_lock_owner() {
   local owner="$1/owner"
 
   # lock acquired, save owner and return
-  [ -n "$DRY_RUN" ] || echo $$ > "$owner" && return 0
+  [[ $DRY_RUN ]] || echo "$$" > "$owner" && return
 
   debug "failed to create file '$owner'"
 
@@ -1158,7 +1155,7 @@ function set_lock_owner() {
 
 function remove_lock() { # <target>
 
-  local lock="$1/dsnap.lock" Pid=
+  local lock="$1/dsnap.lock" Pid
 
   debug "removing lock for target $1"
 
@@ -1169,7 +1166,7 @@ function remove_lock() { # <target>
   }
 
   # if lock not ours, skip
-  [ "$Pid" = $$ ] || {
+  [[ $Pid == "$$" ]] || {
     warn "Failed to unlock target $1 (lock not ours)"
     return 1
   }
@@ -1181,12 +1178,12 @@ function remove_lock() { # <target>
 }
 
 function unlock_target() { # <target>
-  local i=
-  for i in ${!LOCKED_TARGETS[@]}; do
-    [ "$1" == "${LOCKED_TARGETS[$i]}" ] && {
+  local i
+  for i in "${!LOCKED_TARGETS[@]}"; do
+    [[ $1 == "${LOCKED_TARGETS[$i]}" ]] && {
       remove_lock "$1"
-      unset LOCKED_TARGETS[$i]
-      return 0
+      unset "LOCKED_TARGETS[$i]"
+      return
     }
   done
 
@@ -1198,28 +1195,26 @@ function release_locked_targets() {
 
   debug "\nRELEASE: releasing all locked targets"
 
-  local Target=
+  local Target
   for Target in "${LOCKED_TARGETS[@]}"; do
     remove_lock "$Target"
   done
 
   # clear list
   LOCKED_TARGETS=()
-
-  return 0
 }
 
 # sets AllTargets
 function get_all_targets() {
   # <type>
-  local type="$1"
+  local type=$1
 
-  local Line=0 Label= Source= Target= Opts= Vers= # used by get_backup_entry
-  local dup= entry= targets=()
+  local Line=0 Label Source Target Opts Vers # used by get_backup_entry
+  local dup entry targets=()
   for entry in "${BACKUP_ENTRIES[@]}"; do
 
     ((++Line))
-    get_backup_entry $type "$entry" || continue
+    get_backup_entry "$type" "$entry" || continue
 
     targets+=("$Target")
   done
@@ -1231,14 +1226,12 @@ function get_all_targets() {
 
     # see if already in list
     for dup in "${AllTargets[@]}"; do
-      [ "$Target" = "$dup" ] && continue 2
+      [[ $Target == "$dup" ]] && continue 2
     done
 
     debug "adding '$Target' to AllTargets list"
     AllTargets+=("$Target")
   done
-
-  return 0
 }
 
 function mode_unlock() {
@@ -1248,7 +1241,7 @@ function mode_unlock() {
   local AllTargets=()
   get_all_targets "valid"
 
-  local Target=
+  local Target
   for Target in "${AllTargets[@]}"; do
 
     debug "unlocking target '$Target'"
@@ -1258,7 +1251,8 @@ function mode_unlock() {
     verbose "Removing '$Target/dsnap.lock'"
 
     # remove lock dir
-    run rm -rf "$Target/dsnap.lock" || warn "Unable to remove lock for target '$Target'"
+    run rm -rf "$Target/dsnap.lock" ||
+      warn "Unable to remove lock for target '$Target'"
   done
 
   return 0
@@ -1271,21 +1265,24 @@ function mode_list() {
   local AllTargets=()
   get_all_targets "all"
 
-  local Target= words=() Vers= tag= Line=0
+  local Target words=() Vers tag Line=0
   for Target in "${AllTargets[@]}"; do
 
     debug "listing target '$Target'"
 
-    if [ ! -d "$Target" ]; then
+    if [[ ! -d $Target ]]; then
       tag="  (no-access)   "
     elif ! get_target_version "$Target"; then
       tag="  (bad-version) "
     else
-      [ -d "$Target/snap.1" ] && words=($(ls 2>/dev/null -ld "$Target/snap.1")) || words=()
-      if [ ${#words[@]} -lt 9 ]; then
+      words=()
+      [[ -d $Target/snap.1 ]] &&
+        read -ra words < <(ls 2>/dev/null -ld "$Target/snap.1")
+
+      if (( ${#words[@]} < 9 )); then
 	tag="  (none)        "
       else
-	tag=$(printf "[ %3.3s %2.2s %5.5s ]" "${words[5]}" "${words[6]}" "${words[7]}")
+	printf -v tag "[ %3.3s %2.2s %5.5s ]" "${words[5]}" "${words[6]}" "${words[7]}"
       fi
     fi
     log "$tag $Target"
@@ -1306,36 +1303,37 @@ function cleanup() {
   # remove all target locks (if any)
   release_locked_targets
 
-  [ -z "${POST_HOOK_DONE:-}" ] && {
+  [[ $POST_HOOK_DONE ]] || {
     run_hooks 0 "post-backup"
     POST_HOOK_DONE=1
   }
 
   # tell client we're done
-  [ "$MODE" == ":remote" ] && {
+  [[ $MODE == :remote ]] && {
     echo "done"
-    read -t 10 # wait for remote to close connection
+    read -rt 10 # wait for remote to close connection
   }
 
   return 0
 }
 
+# shellcheck disable=SC2329
 function trap_exit() {
   trap "" PIPE
   err "Unexpected exit, cleaning up"
   cleanup
-  exit $EXIT_CODE
+  exit "$EXIT_CODE"
 }
 
 function lock_target() {
   # <target-dir>
-  local tar="$1" lock="$1/dsnap.lock" locked=
+  local tar=$1 lock="$1/dsnap.lock" locked
 
   debug "checking if target '$tar' already locked"
 
   # if already locked, just return (skipped targets don't call lock)
   for locked in "${LOCKED_TARGETS[@]}"; do
-    [ "$tar" = "$locked" ] && {
+    [[ $tar == "$locked" ]] && {
       debug "target '$tar' already locked"
       return 0
     }
@@ -1343,21 +1341,21 @@ function lock_target() {
 
   debug "attempting to lock target '$tar'"
 
-  local retry= Pid=
+  local retry Pid
   while ! run_fail_ok mkdir 2>/dev/null "$lock"; do
 
     # check existence
-    [ -d "$lock" ] || {
+    [[ -d $lock ]] || {
       set_exit_code 1
       warn "Unable to create lock for target '$tar'"
       return 1
     }
 
     # check if lock valid
-    get_lock_pid "$lock" || [ -n "$retry" ] && {
+    get_lock_pid "$lock" || [[ $retry ]] && {
 
       # lock owned or we lost the race on retry
-      if [ -n "$Pid" ]; then
+      if [[ $Pid ]]; then
 	warn "Target '$tar' locked by process $Pid"
       else
 	warn "Target '$tar' locked by another process"
@@ -1395,7 +1393,7 @@ function lock_target() {
 function mode_rotate() {
 
   # init becomes snap once complete
-  [ "$MODE" = "init" ] && MODE="snap"
+  [[ $MODE == init ]] && MODE="snap"
 
   debug "\nROTATE: performing '$MODE' rotation"
 
@@ -1403,24 +1401,26 @@ function mode_rotate() {
   get_all_targets "valid"
 
   # these variables need to be named after $MODE values
-  local snap="$MAX_PER_DAY" daily=7 weekly=4 monthly=12 yearly="$MAX_YEARS"
+  # shellcheck disable=SC2034
+  local snap=$MAX_PER_DAY daily=7 weekly=4 monthly=12 yearly=$MAX_YEARS
   # mappings from mode to previous mode
-  local bsnap= bdaily=snap bweekly=daily bmonthly=weekly byearly=monthly
+  # shellcheck disable=SC2034
+  local bsnap bdaily=snap bweekly=daily bmonthly=weekly byearly=monthly
 
-  local bmode= num= dnum= src_backup= new_backup= old_backup= Target=
+  local bmode num dnum src_backup new_backup old_backup Target
   for Target in "${AllTargets[@]}"; do
 
     debug "rotating target '$Target'"
 
     num=${!MODE}
-    if [ -z "$num" ]; then
+    [[ $num ]] || {
       set_exit_code 7
       err "FATAL: '$MODE' has no rotation limits (check mode_rotate function)"
       break
-    fi
+    }
 
     # get previous mode
-    bmode=b$MODE
+    bmode="b$MODE"
     bmode=${!bmode} # maps daily->snap etc
 
     new_backup="$Target/$MODE.0"
@@ -1428,7 +1428,7 @@ function mode_rotate() {
     # lock new target or skip
     lock_target "$Target" || continue
 
-    if [ -z "$bmode" ]; then
+    if [[ -z $bmode ]]; then
 
       is_dir "$new_backup" "dryok" || {
 	verbose "No new backup to rotate in: '$new_backup'"
@@ -1436,7 +1436,7 @@ function mode_rotate() {
       }
 
       # date new backup (if not remote)
-      if [ -z "$REMOTE_ENABLED" ]; then
+      [[ $REMOTE_ENABLED ]] || {
 
         debug "setting date on '$new_backup'"
 
@@ -1445,7 +1445,7 @@ function mode_rotate() {
 	  err "Skipping '$MODE' rotation for target '$Target'"
 	  continue
         }
-      fi
+      }
 
     elif ! exists "$new_backup"; then
 
@@ -1491,7 +1491,7 @@ function mode_rotate() {
     # now move 4->5 3->4... etc
     debug "rotating '$MODE' folders"
 
-    while [ $num -gt 0 ]; do
+    while (( num > 0 )); do
 
       dnum=$((num--))
 
@@ -1511,12 +1511,12 @@ function mode_rotate() {
 
 function is_prepared_target() {
   # <target-dir>
-  local tar="$1" prep=
+  local tar=$1 prep
 
   debug "checking if '$tar' in prepped targets"
 
   for prep in "${PREPPED_TARGETS[@]}"; do
-    [ "$tar" = "$prep" ] && return 0
+    [[ $tar == "$prep" ]] && return
   done
 
   return 1
@@ -1524,9 +1524,9 @@ function is_prepared_target() {
 
 function prepare_target() {
   # <target-dir>
-  local tar="$1"
+  local tar=$1
 
-  is_prepared_target "$tar" && return 0
+  is_prepared_target "$tar" && return
 
   debug "\nPREPARE: preparing '$tar'"
 
@@ -1551,55 +1551,53 @@ function prepare_target() {
 
 function mode_remote() {
 
-  local AllTargets=() request= Target= tar= ready=
+  local AllTargets=() request Target tar ready
 
   get_all_targets "valid"
 
   # let client know we're ready
-  while read -t 10 request; do
-    case "$request" in
+  while read -rt 10 request; do
+    case $request in
       check)
         echo "ready"
         ready=1
-        break
         ;;
       *)
         err "Unknown request: $request"
         ready=0
-        break
         ;;
     esac
+    break
   done
 
-  [ -n "$ready" ] || { err "Timeout communicating with client"; ready=0; }
-  [ "$ready" == 1 ] || return 0
+  [[ $ready ]] || { err "Timeout communicating with client"; ready=0; }
+  [[ $ready == 1 ]] || return 0
 
-  while read request; do
+  while read -r request; do
 
     debug "Received client request: $request"
 
-    case "$request" in
+    case $request in
       lock:*)
         tar=${request#lock:}
         for Target in "${AllTargets[@]}"; do
-          if [ "$tar" == "$Target" ]; then
-            if lock_target "$Target"; then
-              debug "validating snap.1 can be accessed"
-              if is_dir "$Target/snap.1" "read"; then
-                echo "locked:$Target"
-              else
-                err "$Target/snap.1 is inaccessable"
-                unlock_target "$Target"
-              fi
+          [[ $tar == "$Target" ]] || continue
+          if lock_target "$Target"; then
+            debug "validating snap.1 can be accessed"
+            if is_dir "$Target/snap.1" "read"; then
+              echo "locked:$Target"
             else
-              err "Unable to lock target $Target"
+              err "$Target/snap.1 is inaccessable"
+              unlock_target "$Target"
             fi
-            tar=
-            break
+          else
+            err "Unable to lock target $Target"
           fi
+          tar=''
+          break
         done
         # not found
-        [ -n "$tar" ] && err "Target $tar not found"
+        [[ $tar ]] && err "Target $tar not found"
         ;;
       unlock)
         # just break the loop, cleanup will unlock everything locked
@@ -1621,33 +1619,33 @@ function mode_snap() {
   # check rsync can be found
   init_rsync || return 1
 
-  if [ -n "${LOGFILE:-}" ]; then
+  [[ $LOGFILE ]] && {
 
     # create log dir if missing
     debug "logging enabled to '$LOGFILE'"
 
     local logdir="${LOGFILE%/*}"
-    if [ "$logdir" != "$LOGFILE" ]; then
+    [[ $logdir != "$LOGFILE" ]] && {
 
       is_dir "$logdir" || {
-	run mkdir -p "$logdir" && is_dir "$logdir" "dryok" || {
+	{ run mkdir -p "$logdir" && is_dir "$logdir" "dryok"; } || {
 	  err "Unable to create '$logdir' for rsync logging"
 	  return 1
 	}
       }
-    fi
+    }
 
     is_file "$LOGFILE" "write" || {
       err "Unable to write to '$LOGFILE' for rsync logging"
       return 1
     }
-  fi
+  }
 
-  local Line=0 Label= Source= Target= Opts= Vers= # used by get_backup_entry
-  local dest_dir= prev_backup= link_dest= opt= options=()
-  local ropts=() from_rem= to_rem= rout= rem_ready= timeout=10
+  local Line=0 Label Source Target Opts Vers # used by get_backup_entry
+  local dest_dir prev_backup link_dest opt options=()
+  local ropts=() from_rem to_rem rout rem_ready timeout=10
 
-  if [ -n "$REMOTE_ENABLED" ]; then
+  if [[ $REMOTE_ENABLED ]]; then
     for opt in $REMOTE_SNAP_OPTIONS; do
       case $opt in
         -h|-l|-n|-r|-s)
@@ -1661,14 +1659,15 @@ function mode_snap() {
           ;;
       esac
     done
-    [ -n "$DRY_RUN" ] && ropts+=("'-n'")
+    [[ $DRY_RUN ]] && ropts+=("'-n'")
     # spawn dsnap :remote to handle remote host (even on dry-run)
-    verbose "Running $SSH_EXE" $SSH_OPTIONS "$REMOTE_LOCK_HOST" "$REMOTE_SNAP_EXE" "${ropts[@]}" ":remote"
+    verbose "Running $SSH_EXE $SSH_OPTIONS $REMOTE_LOCK_HOST" "$REMOTE_SNAP_EXE" "${ropts[@]}" ":remote"
+    # shellcheck disable=SC2086
     coproc "$SSH_EXE" $SSH_OPTIONS "$REMOTE_LOCK_HOST" "$REMOTE_SNAP_EXE" "${ropts[@]}" ":remote" 2>&1
     from_rem=${COPROC[0]}
     to_rem=${COPROC[1]}
-    while read -u $from_rem -t $timeout rout; do
-      case "$rout" in
+    while read -ru "$from_rem" -t "$timeout" rout; do
+      case $rout in
         ready)
           debug "dsnap on host $REMOTE_LOCK_HOST is ready"
           rem_ready=1
@@ -1678,7 +1677,7 @@ function mode_snap() {
           # let the hooks do their work...
           debug "dsnap on host $REMOTE_LOCK_HOST has started"
           timeout=60
-          echo >&$to_rem "check"
+          echo >"&$to_rem" "check"
           ;;
         error:*)
           err "dsnap on remote host $REMOTE_LOCK_HOST failed: ${rout#error:}"
@@ -1693,20 +1692,20 @@ function mode_snap() {
           ;;
       esac
     done
-    [ -n "$rem_ready" ] || {
+    [[ $rem_ready ]] || {
       err "Failed to connect to remote host $REMOTE_LOCK_HOST"
       rem_ready=0
     }
     # close connection to remote dsnap if failure
-    [ "$rem_ready" == 1 ] || {
+    [[ $rem_ready == 1 ]] || {
       eval "exec $to_rem<&-"
       sleep 1
-      kill $COPROC_PID 2>/dev/null
+      kill "$COPROC_PID" 2>/dev/null
       return 1
     }
   fi
 
-  local entry= subdir=
+  local entry subdir
   for entry in "${BACKUP_ENTRIES[@]}"; do
 
     ((++Line))
@@ -1715,8 +1714,8 @@ function mode_snap() {
     # build options for this backup entry
     options=()
 
-    # add filter if available
-    if [ -n "${Label##*/*}" ] && is_file "$FILTERS-$Label"; then
+    # add filter if available (single arg)
+    if [[ ${Label##*/*} ]] && is_file "$FILTERS-$Label"; then
       debug "rsync filter is '$FILTERS-$Label'"
       options+=("--filter=merge $FILTERS-$Label")
     elif is_file "$FILTERS"; then
@@ -1725,17 +1724,17 @@ function mode_snap() {
     fi
 
     # verbose or quiet
-    if [ -n "${VERBOSE_RSYNC:-}" ]; then
+    if [[ $VERBOSE_RSYNC ]]; then
       options+=("-v" "--out-format=%i %n%L")
     else
       options+=("-q")
     fi
 
     # version 1 uses Source for Label in dest_dir
-    [ $Vers -eq 1 ] && Label="$Source"
+    (( Vers == 1 )) && Label=$Source
 
     # assign subdir if not remote sync
-    [ -z "$REMOTE_ENABLED" ] && subdir="/${Label#/}"
+    [[ $REMOTE_ENABLED ]] || subdir="/${Label#/}"
 
     dest_dir="$Target/snap.0$subdir"
     debug "rsync destination is '$dest_dir'"
@@ -1744,49 +1743,49 @@ function mode_snap() {
     if is_dir "$prev_backup"; then
 
       # previous backup, convert init to snap
-      if [ "$MODE" = "init" ]; then
+      [[ $MODE == init ]] && {
 	verbose "Backup exists for label '$Label' - performing snap"
-      fi
+      }
 
       # set link-dest based on whether target is relative or absolute
-      if [ -n "${Target%%/*}" ]; then
-        [ -n "$REMOTE_ENABLED" ] && link_dest="../snap.1" ||
+      if [[ ${Target%%/*} ]]; then
+        [[ $REMOTE_ENABLED ]] && link_dest="../snap.1" ||
             link_dest="../../snap.1$subdir"
       else
-	link_dest="$prev_backup"
+	link_dest=$prev_backup
       fi
       debug "rsync link-dest is '$link_dest'"
 
       options+=("--link-dest=$link_dest/")
 
-    elif [ "$MODE" = "snap" ]; then
+    elif [[ $MODE == snap ]]; then
 
       warn "Previous backup '$prev_backup' missing"
       err "  (NOTE: Run '${0##*/} init' after adding/editing backup entries)"
       add_skipped_target "$Target"
       continue
     else
-      link_dest=
+      link_dest=''
     fi
 
     # user or default options
     for opt in $Opts; do options+=("$opt"); done
 
     # only add file logging if not dry-run (or rsync will still write logs)
-    if [ -n "$DRY_RUN" ]; then
+    if [[ $DRY_RUN ]]; then
       options+=("--dry-run")
     else
       options+=("--log-file=$LOGFILE")
     fi
 
-    if [ -n "$REMOTE_ENABLED" ]; then
+    if [[ $REMOTE_ENABLED ]]; then
       # get lock on remote
       debug "\nREMOTE PREPARE: locking remote source '$Source'"
 
-      echo >&$to_rem "lock:$Source"
-      rem_ready=
-      while read -u $from_rem -t 10 rout; do
-        case "$rout" in
+      echo >&"$to_rem" "lock:$Source"
+      rem_ready=''
+      while read -ru "$from_rem" -t 10 rout; do
+        case $rout in
           locked:*)
             debug "remote has locked source '$Source'"
             rem_ready=1
@@ -1805,12 +1804,12 @@ function mode_snap() {
             ;;
         esac
       done
-      [ -n "$rem_ready" ] || { # timeout
+      [[ $rem_ready ]] || { # timeout
         err "Failed to communicate with dsnap on $REMOTE_LOCK_HOST"
-        from_rem=
+        from_rem=''
         break
       }
-      [ "$rem_ready" == 1 ] || { # remote lock failed
+      [[ $rem_ready == 1 ]] || { # remote lock failed
         add_skipped_target "$Target"
         continue
       }
@@ -1827,14 +1826,14 @@ function mode_snap() {
 
     # create dest_dir
     is_dir "$dest_dir" || {
-      run mkdir -p "$dest_dir" && is_dir "$dest_dir" "dryok" || {
+      { run mkdir -p "$dest_dir" && is_dir "$dest_dir" "dryok"; } || {
 	warn "Unable to create new destination directory '$dest_dir'"
 	add_skipped_target "$Target"
 	continue
       }
     }
 
-    if [ -n "$link_dest" ]; then
+    if [[ $link_dest ]]; then
       verbose "Backing up '$Source' to '$dest_dir'"
     else
       verbose "Creating initial backup of '$Source' to '$dest_dir'"
@@ -1842,12 +1841,12 @@ function mode_snap() {
 
     verbose_cmd "${RSYNC[@]}" "${options[@]}" "$Source/" "$dest_dir/"
     local rc=0
-    if [ -z "$FAKE_DRY_RUN" ]; then
+    [[ $FAKE_DRY_RUN ]] || {
       "${RSYNC[@]}" "${options[@]}" "$Source/" "$dest_dir/" || rc=$?
-    fi
+    }
 
     # allow rsync error 24 (files vanished) as source may be in use
-    if [ $rc -ne 0 -a $rc -ne 24 ]; then
+    if (( rc != 0 && rc != 24 )); then
 
       verbose "rsync failed with error $rc"
       warn "Backup to destination '$dest_dir' failed"
@@ -1859,13 +1858,13 @@ function mode_snap() {
   done
 
   # if we have working remote, tell it to unlock
-  if [ -n "$from_rem" ]; then
+  if [[ $from_rem ]]; then
     debug "\nREMOTE CLEANUP: unlocking all remote sources"
-    echo >&$to_rem "unlock"
-    rem_ready=
-    while read -u $from_rem -t 10 rout; do
-      case "$rout" in
-        "done")
+    echo >&"$to_rem" "unlock"
+    rem_ready=''
+    while read -ru "$from_rem" -t 10 rout; do
+      case $rout in
+        done)
           debug "remote dsnap has finished"
           rem_ready=1
           break
@@ -1883,18 +1882,18 @@ function mode_snap() {
           ;;
       esac
     done
-    [ -n "$rem_ready" ] || { # timeout
+    [[ $rem_ready ]] || { # timeout
       err "Failed to communicate with dsnap on $REMOTE_LOCK_HOST"
-      from_rem= rem_ready=0
+      from_rem='' rem_ready=0
     }
   fi
 
   # close stdin on remote dsnap, so it quits
-  [ -n "$to_rem" ] && eval "exec $to_rem<&-"
+  [[ $to_rem ]] && eval "exec $to_rem<&-"
 
   debug "\nCLEANUP: checking all prepared targets for failures"
 
-  local new_backup=
+  local new_backup
   for Target in "${PREPPED_TARGETS[@]}"; do
 
     is_skipped_target "$Target" || continue
@@ -1919,19 +1918,20 @@ function mode_snap() {
   mode_rotate
 }
 
+# shellcheck disable=SC2329
 function trap_signal() {
   # ignore pipe so remote output doesn't kill cleanup
   trap "" PIPE
   trap - INT TERM
   set_exit_code 8
   err "Backup cancelled by signal"
-  exit $EXIT_CODE
+  exit "$EXIT_CODE"
 }
 
 function handle_mode() {
 
   # let client know we're here
-  [ "$MODE" == ":remote" ] && echo "starting"
+  [[ $MODE == :remote ]] && echo "starting"
 
   # add trap to cleanup on unexpected exit
   trap trap_exit EXIT
@@ -1943,19 +1943,19 @@ function handle_mode() {
   read_backups || return 0
 
   # any non-empty entries?
-  [ -n "$HAS_BACKUPS" ] || {
+  [[ $HAS_BACKUPS ]] || {
     debug "No backups to process"
     return 0
   }
 
-  if [ "$MODE" != "unlock" -a "$MODE" != "list" ]; then
-    [ -n "${DELAY_ENABLED:-}" -a -n "${STARTUP_DELAY:-}" ] && {
+  if [[ $MODE != unlock && $MODE != list ]]; then
+    [[ $DELAY_ENABLED && $STARTUP_DELAY ]] && {
       verbose "Delaying for '$STARTUP_DELAY' seconds before starting"
       sleep "$STARTUP_DELAY"
     }
   fi
 
-  case "$MODE" in
+  case $MODE in
     unlock)
       mode_unlock
       ;;
@@ -1993,6 +1993,6 @@ handle_mode
 
 cleanup
 
-debug "$MODE complete, exit ${EXIT_CODE:-0}"
+debug "$MODE complete, exit $EXIT_CODE"
 
-exit ${EXIT_CODE:-0}
+exit $EXIT_CODE

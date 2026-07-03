@@ -2,7 +2,7 @@
 # -*- mode: shell-script; fill-column: 78 -*-
 # ex: filetype=sh
 #
-# DSnap v2.2.0 Local Rsync Backups With History
+# DSnap v2.2.1 Local Rsync Backups With History
 # Author: Scott Shambarger <devel@shambarger.net>
 #
 # Copyright Scott Shambarger.  All rights reserved.
@@ -549,22 +549,22 @@ function is_file() {
   if [[ $mode == read ]]; then
     [[ -f $file && -r $file ]] && {
       debug "read access available to file '$file'"
-      return 0
+      return
     }
   else
     [[ -f $file && -w $file ]] && {
       debug "write access available to file '$file'"
-      return 0
+      return
     }
     [[ -e $file ]] || {
       debug "may create file '$file'"
-      return 0
+      return
     }
   fi
   [[ $DRY_RUN ]] && [[ $FAKE_DRY_RUN || $mode == dryok ]] && {
     [[ $mode == dryok ]] && mode="write"
     debug "[dry-run] fake $mode access to file '$file'"
-    return 0
+    return
   }
   [[ $mode == dryok ]] && mode="write"
   debug "no $mode access to file '$file'"
@@ -578,18 +578,18 @@ function is_dir() {
   [[ -d $dir && -x $dir && -r $dir ]] && {
     [[ $mode == read ]] && {
       debug "read access available to directory '$dir'"
-      return 0
+      return
     }
     # our use of write access requires read too
     [[ -w $dir ]] && {
       debug "write access available to directory '$dir'"
-      return 0
+      return
     }
   }
   [[ $DRY_RUN ]] && [[ $FAKE_DRY_RUN || $mode == dryok ]] && {
     [[ $mode == dryok ]] && mode="write"
     debug "[dry-run] fake $mode access to directory '$dir'"
-    return 0
+    return
   }
   [[ $mode == dryok ]] && mode="write"
   debug "no $mode access to directory '$dir'"
@@ -795,6 +795,8 @@ function init_rsync() {
       return 1
     }
   }
+
+  return 0
 }
 
 function strip() {
@@ -1628,6 +1630,7 @@ function mode_snap() {
     [[ $logdir != "$LOGFILE" ]] && {
 
       is_dir "$logdir" || {
+        debug "creating directory '$logdir'"
 	{ run mkdir -p "$logdir" && is_dir "$logdir" "dryok"; } || {
 	  err "Unable to create '$logdir' for rsync logging"
 	  return 1
@@ -1826,6 +1829,7 @@ function mode_snap() {
 
     # create dest_dir
     is_dir "$dest_dir" || {
+      debug "creating directory '$dest_dir'"
       { run mkdir -p "$dest_dir" && is_dir "$dest_dir" "dryok"; } || {
 	warn "Unable to create new destination directory '$dest_dir'"
 	add_skipped_target "$Target"

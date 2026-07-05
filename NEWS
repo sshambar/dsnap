@@ -25,3 +25,7 @@ dsnap-2.2.2
 - fix remote mode
 - fix config loading
 
+dsnap-2.3.0
+===========
+
+- added config week/month/year rotation limits

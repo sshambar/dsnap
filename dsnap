@@ -5,7 +5,7 @@
 #
 # Copyright Scott Shambarger.  All rights reserved.
 #
-# DSnap v2.2.2 Local Rsync Backups With History
+# DSnap v2.3.0 Local Rsync Backups With History
 # Author: Scott Shambarger <devel@shambarger.net>
 #
 # ======== SUMMARY
@@ -82,11 +82,11 @@
 # identical files hard linked together to save space.  DSnap should be run
 # by cron (or similar) with the following "mode" parameters:
 #
-#     snap    - run once or more a day (see MAX_PER_DAY below)
-#     daily   - run once per day, after snap
-#     weekly  - run once per week, after daily
-#     monthly - run once per month, after weekly
-#     yearly  - run once per year, after monthly
+#     snap    - run once or more a day (ref MAX_PER_DAY below)
+#     daily   - run once per day, after snap (ref MAX_PER_WEEK)
+#     weekly  - run once per week, after daily (ref MAX_PER_MONTH)
+#     monthly - run once per month, after weekly (ref MAX_PER_YEAR)
+#     yearly  - run once per year, after monthly (ref MAX_YEARS)
 #
 # The "snap" mode creates new incremental backups based on the full backup
 # created by "init".  All other modes just maintain the history by renaming
@@ -303,6 +303,15 @@
 #         (Minimum is 2 so that a full backup is available as snap.1
 #         after the "daily" mode)
 #
+#     MAX_PER_WEEK (default: 7) - Maximum number of "daily" backups to keep.
+#         (Minimum 2 as in PER_DAY)
+#
+#     MAX_PER_MONTH (default: 4) - Maximum number of "weekly" backups to keep.
+#         (Minimum 2 as in PER_DAY)
+#
+#     MAX_PER_YEAR (default: 12) - Maximum number of "monthly" backups to keep.
+#         (Minimum 2 as in PER_DAY)
+#
 #     MAX_YEARS (default: 5) Maximum number of yearly backups to keep.
 #         (Minimum is 1, or disabled by simply not running "yearly" modes)
 #
@@ -354,8 +363,7 @@
 # shellcheck disable=SC1090
 
 # declare these variables as numbers
-declare -i MAX_PER_DAY
-declare -i MAX_YEARS
+declare -i MAX_PER_DAY MAX_PER_WEEK MAX_PER_MONTH MAX_PER_YEAR MAX_YEARS
 declare -i EXIT_CODE
 
 # Functions
@@ -376,6 +384,9 @@ function init_defaults() {
   ALLOW_RELATIVE="no"
   DEFAULT_RSYNC_OPTIONS="-aHS"
   MAX_PER_DAY=2
+  MAX_PER_WEEK=7
+  MAX_PER_MONTH=4
+  MAX_PER_YEAR=12
   MAX_YEARS=5
   LOCK_TIMEOUT_HOURS=24
   STARTUP_DELAY=120
@@ -710,7 +721,9 @@ function check_globals() {
   fi
 
   check_min 2 "MAX_PER_DAY" || return 3
-
+  check_min 2 "MAX_PER_WEEK" || return 3
+  check_min 2 "MAX_PER_MONTH" || return 3
+  check_min 2 "MAX_PER_YEAR" || return 3
   check_min 1 "MAX_YEARS" || return 3
 
   [[ $MODE =~ ^(list|init|snap|daily|weekly|monthly|yearly|unlock|:remote)$ ]] || {
@@ -1400,7 +1413,8 @@ function mode_rotate() {
 
   # these variables need to be named after $MODE values
   # shellcheck disable=SC2034
-  local snap=$MAX_PER_DAY daily=7 weekly=4 monthly=12 yearly=$MAX_YEARS
+  local snap=$MAX_PER_DAY daily=$MAX_PER_WEEK weekly=$MAX_PER_MONTH \
+        monthly=$MAX_PER_YEAR yearly=$MAX_YEARS
   # mappings from mode to previous mode
   # shellcheck disable=SC2034
   local bsnap bdaily=snap bweekly=daily bmonthly=weekly byearly=monthly

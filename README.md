@@ -103,11 +103,11 @@ Backups are ordered by date (inter-day snap, daily, weekly etc), with
 identical files hard linked together to save space.  DSnap should be
 run by cron (or similar) with the following "mode" parameters:
 
-- **snap** - run once or more a day (see **MAX_PER_DAY** below)
-- **daily** - run once per day, after snap
-- **weekly** - run once per week, after daily
-- **monthly** - run once per month, after weekly
-- **yearly** - run once per year, after monthly
+- **snap** - run once or more a day (ref **MAX_PER_DAY** below)
+- **daily** - run once per day, after snap (ref **MAX_PER_WEEK**)
+- **weekly** - run once per week, after daily (ref **MAX_PER_MONTH**)
+- **monthly** - run once per month, after weekly (ref **MAX_PER_YEAR**)
+- **yearly** - run once per year, after monthly (ref **MAX_YEARS**)
 
 The "snap" mode creates new incremental backups based on the full
 backup created by "init".  All other modes just maintain the history
@@ -338,6 +338,15 @@ The following variables may be set:
 - **MAX_PER_DAY** (default: 2) - Maximum number of "snap" backups to keep.
         (Minimum is 2 so that a full backup is available as snap.1
         after the "daily" mode)
+
+- **MAX_PER_WEEK** (default: 7) - Maximum number of "daily" backups to keep.
+        (Minimum 2 as in PER_DAY)
+
+- **MAX_PER_MONTH** (default: 4) - Maximum number of "weekly" backups to keep.
+        (Minimum 2 as in PER_DAY)
+
+- **MAX_PER_YEAR** (default: 12) - Maximum number of "monthly" backups to keep.
+        (Minimum 2 as in PER_DAY)
 
 - **MAX_YEARS** (default: 5) Maximum number of yearly backups to keep.
         (Minimum is 1, or disabled by simply not running "yearly" modes)

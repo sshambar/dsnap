@@ -2,7 +2,7 @@
 # -*- mode: shell-script; fill-column: 78 -*-
 # ex: filetype=sh
 #
-# DSnap v2.2.1 Local Rsync Backups With History
+# DSnap v2.2.2 Local Rsync Backups With History
 # Author: Scott Shambarger <devel@shambarger.net>
 #
 # Copyright Scott Shambarger.  All rights reserved.
@@ -417,7 +417,7 @@ function set_exit_code() {
 }
 
 function debuglog() {
-  [ -n "$DEBUGFILE" ] && echo 2>/dev/null >> "$DEBUGFILE" -e "$*"
+  [[ $DEBUGFILE ]] && echo 2>/dev/null >> "$DEBUGFILE" -e "$*"
   return 0
 }
 
@@ -1004,12 +1004,12 @@ function get_backup_entry() {
   # remove trailing /
   Label="${Label%/}"; Source="${Source%/}"; Target="${Target%/}"
 
-  if [ -n "$REMOTE_ENABLED" ]; then
-    [ "$src" != "$Source" ] || {
+  if [[ $REMOTE_ENABLED ]]; then
+    [[ $src != "$Source" ]] || {
       debug "Skipping non-remote entry"
       return 1
     }
-  elif [ "$src" != "$Source" ]; then
+  elif [[ $src != "$Source" ]]; then
     debug "Skipping remote entry"
     return 1
   fi
@@ -1023,7 +1023,7 @@ function get_backup_entry() {
     return 1
   }
 
-  [ "$type" = "all" ] || verify_backup_entry || {
+  [[ $type == all ]] || verify_backup_entry || {
     add_skipped_target "$Target"
     return 1
   }
@@ -1039,14 +1039,15 @@ function read_backups() {
   BACKUP_ENTRIES=()
 
   local entry
-  while read -r entry || [[ $entry ]]; do
+  # shellcheck disable=SC2162
+  while read entry || [[ $entry ]]; do
     entry=$(strip "$entry")
     [[ $entry =~ ^#.* ]] && entry=''
     [[ $entry ]] && HAS_BACKUPS=1
     BACKUP_ENTRIES+=("$entry")
   done < "$BACKUPS"
 
-  [ ${#BACKUP_ENTRIES[@]} -gt 0 ]
+  (( ${#BACKUP_ENTRIES[@]} > 0 ))
 }
 
 function run_hooks() {
@@ -1062,7 +1063,7 @@ function run_hooks() {
 
     if [[ -x $file ]]; then
       rc=0
-      if [ ${#REQUESTED_TARGETS[@]} -gt 0 ]; then
+      if (( ${#REQUESTED_TARGETS[@]} > 0 )); then
 	run "$file" "${REQUESTED_TARGETS[@]}" || rc=$?
       else
 	run "$file" || rc=$?
@@ -1680,7 +1681,7 @@ function mode_snap() {
           # let the hooks do their work...
           debug "dsnap on host $REMOTE_LOCK_HOST has started"
           timeout=60
-          echo >"&$to_rem" "check"
+          echo >&"$to_rem" "check"
           ;;
         error:*)
           err "dsnap on remote host $REMOTE_LOCK_HOST failed: ${rout#error:}"

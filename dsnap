@@ -202,6 +202,13 @@
 #   restrict,command="/path/to/rrsync -ro /target/dir" <dsnap-host-key>
 #   restrict,command="/path/to/dsnap -c /local/config :remote" <dsnap-lock-key>
 #
+# NOTE: Using /target/dir with rrsync will only work if a symlink
+# under /target/dir is added to itself, eg.
+#
+#   $ cd /target/dir
+#   $ mkdir target
+#   $ ln -s ../ target/dir
+#
 # If you're running DSnap as root, you may also wish to add --numeric-ids
 # to DEFAULT_RSYNC_OPTIONS if local host doesn't use the same user-id
 # mapping as the remote host.

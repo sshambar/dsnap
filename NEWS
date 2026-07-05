@@ -9,3 +9,19 @@ dsnap-2.1.1
 - added remote mirror support
 - support Ctrl-C (or kill) to cancel running backup
 
+dsnap-2.2.0
+===========
+
+- shellcheck cleanup (untested)
+
+dsnap-2.2.1
+===========
+
+- fix init mode
+
+dsnap-2.2.2
+===========
+
+- fix remote mode
+- fix config loading
+

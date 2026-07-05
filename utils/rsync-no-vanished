@@ -1,0 +1,11 @@
+#!/bin/bash
+ignoreexit=24
+ignoreout='^(file has vanished: |rsync warning: some files vanished before they could be transferred)'
+set -o pipefail
+rsync "$@" 2>&1 | (grep -E -v "$ignoreout" || true)
+a=$?
+if [ $a == $ignoreexit ]; then
+    exit 0
+else
+    exit $a
+fi
